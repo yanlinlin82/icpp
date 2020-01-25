@@ -9,6 +9,7 @@ using namespace std;
 
 enum token_type { unknown = -1, symbol, number, text, op };
 
+bool source = false;
 static string src;
 static const char* p; // position of source code parsing
 static token_type type = unknown;
@@ -52,37 +53,79 @@ retry:
 		type = text; char c = *p; token = *p++; while (*p && *p != c) { if (*p == '\\') { token += *p++; }; token += *p++; } token += *p++;
 	} else {
 		static const char* ops[] = { "==", "=", "!=", "!", "++", "+=", "+", "--", "-=", "->", "-", "<=", "<<=", "<<", "<", ">=", ">>=", ">>", ">",
-			"||", "|=", "|", "&&", "&=", "&", "::", ":", "^", "*=", "*", "/=", "/", "%=", "%", "?", "~=", "~", ";", ".", "{", "}", "[", "]", "(", ")", ",", NULL };
+			"||", "|=", "|", "&&", "&=", "&", "::", ":", "^", "*=", "*", "/=", "/", "%=", "%", "?", "~=", "~", ";", ".", "{", "}", "[", "]", "(", ")", ",", nullptr };
 		for (const char** q = ops; *q; ++q) { size_t l = strlen(*q); if (memcmp(p, *q, l) == 0) { type = op; token = *q; p += l; return; } }
 		type = unknown; token = *p++;
 	}
 }
 
+void expect_token(string t, string stat)
+{
+	if (token != t) { cerr << "missing '" << t << "' for '" << stat << "'!" << endl; exit(1); }
+}
+
+void skip_until(string t, string stat)
+{
+	next(); while (!token.empty() && token != t) next();
+	if (token.empty()) { cerr << "missing '" << t << "' for '" << stat << "'!" << endl; exit(1); }
+	next();
+}
+
+void parse_expression()
+{
+	next();
+}
+
 void parse_statments()
 {
-	if (token == "typedef") {
-		next(); while (!token.empty() && token != ";") next();
-		if (token.empty()) { cerr << "missing ';' for 'typedef'!" << endl; exit(1); }
-		next();
-	} else if (token == "if") {
-		next(); if (token != "(") { cerr << "missing '(' for 'for'!" << endl; exit(1); }
+	if (token == "{") {
+		next(); while (!token.empty() && token != "}") parse_statments();
+		expect_token("}", "{");
+	} if (token == "if") {
+		next(); expect_token("(", "if");
+		next(); parse_expression(); expect_token(")", "if");
+		next(); parse_statments();
 	} else if (token == "for") {
-		next();
+		next(); expect_token("(", "for");
+		next(); parse_expression(); expect_token(";", "for");
+		next(); parse_expression(); expect_token(";", "for");
+		next(); parse_expression(); expect_token(")", "for");
+		expect_token(")", "for");
+		next(); parse_statments();
 	} else if (token == "while") {
-		next();
+		next(); expect_token("(", "while");
+		next(); parse_expression(); expect_token(")", "while");
+		next(); parse_statments();
 	} else if (token == "do") {
-		next();
+		next(); expect_token("{", "do");
+		parse_statments();
+		expect_token("while", "do");
+		next(); expect_token("(", "do");
+		next(); parse_expression();
+		next(); expect_token(")", "do");
+		next(); expect_token(";", "do");
 	} else if (token == "return") {
-		next(); while (!token.empty() && token != ";") next();
-		if (token.empty()) { cerr << "missing ';' for 'using'!" << endl; exit(1); }
+		next(); parse_expression(); expect_token(";", "return");
 		next();
+	} else if (token == "typedef") {
+		skip_until(";", "typedef");
 	} else if (type == symbol) {
 		string left = token; next();
 		while (token != ";") {
 			string op = token; next();
 			string right = token; next();
 			if (left == "cout" && op == "<<") {
-				code.push_back(make_pair("cout<<", right));
+				code.push_back(make_pair("PUSH", "cout"));
+				if (type == symbol) {
+					code.push_back(make_pair("LEA", right));
+					code.push_back(make_pair("PUSH", ""));
+				} else if (type == number) {
+				} else if (type == text) {
+					auto s = eval(token);
+					code.push_back(make_pair("PUSH", s));
+				} else {
+				}
+				code.push_back(make_pair("<<", right));
 			}
 		}
 		next();
@@ -91,7 +134,7 @@ void parse_statments()
 	}
 }
 
-void parse_declare()
+void parse_source()
 {
 	if (token == "using") {
 		next(); while (!token.empty() && token != ";") next();
@@ -106,14 +149,14 @@ void parse_declare()
 		if (name == "main") start = code.size();
 		//cerr << "> type: '" << ret_type << "', name: '" << name << "', (next) token: '" << token << "'" << endl;
 		if (token == "(") {
-			while (!token.empty() && token != ")") next();
-			if (token.empty()) { cerr << "missing ')' for function!" << endl; exit(1); }
-			next();
-			if (token != "{") { cerr << "unexpected token rather than '{'!" << endl; exit(1); }
+			skip_until(")", "function");
+			expect_token("{", "function");
 			next();
 			while (token != "}") {
 				parse_statments();
 			}
+			next();
+		} else if (token == ";") {
 			next();
 		}
 	}
@@ -121,16 +164,22 @@ void parse_declare()
 
 int main(int argc, char** argv)
 {
-	if (argc < 2) { cout << "usage: icpp <foo.cpp>" << endl; return 1; }
-	ifstream file(argv[1]); if (!file.is_open()) { cerr << "failed to open file '" << argv[1] << "'!" << endl; return 1; }
-	string line; while (getline(file, line)) { if (!line.empty() && line[0] != '#') src += line + "\n"; }
+	--argc; ++argv;
+	if (argc > 0 && **argv == '-' && (*argv)[1] == 's') { source = true; --argc; ++argv; }
+	if (argc < 1) { cout << "usage: icpp [-s] <foo.cpp>" << endl; return 1; }
+	ifstream file(argv[0]); if (!file.is_open()) { cerr << "failed to open file '" << argv[0] << "'!" << endl; return 1; }
+	size_t line_no = 0; string line; while (getline(file, line)) {
+		++line_no; if (source) { printf("%5zd ", line_no); for (auto c : line) { if (c == '\t') printf("    "); else printf("%c", c); }; printf("\n"); }
+		if (!line.empty() && line[0] != '#') src += line + "\n";
+	}
 	//while (next(), !token.empty()) cout << '[' << token << ']' << endl;
-	for (p = src.c_str(), next(); !token.empty(); ) parse_declare();
+	for (p = src.c_str(), next(); !token.empty(); ) parse_source();
+	if (source) return 0;
 	if (start < 0) { cerr << "main() not defined!" << endl; return 1; }
 	for (size_t i = static_cast<size_t>(start); i < code.size(); ++i) {
 		auto op = code[i].first;
 		auto val = code[i].second;
-		if (op == "cout<<") {
+		if (op == "<<") {
 			if (val == "endl") {
 				cout << endl;
 			} else {
