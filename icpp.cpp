@@ -8,13 +8,28 @@
 #include <unordered_map>
 using namespace std;
 
-//const size_t MEM_SIZE = 32 * 1024 * 1024; // 32MB * sizeof(size_t)
-const size_t MEM_SIZE = 1000;
+const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
-enum CODE                 { EXIT,   PUSH,   POP,   MOVE,   LEA,   GET,   PUT,   ENTER,   LEAVE,   CALL,   SYSTEM   };
-bool CODE_WITH_PARAM[]  = { false,  false,  false, true,   true,  true,  true,  true,    true,    true,   true     };
-const char* CODE_TEXT[] = { "EXIT", "PUSH", "POP", "MOVE", "LEA", "GET", "PUT", "ENTER", "LEAVE", "CALL", "SYSTEM" };
+enum machine_code {
+	// single-word instrument (without parameter)
+	EXIT, PUSH, POP,
+
+	// two-word instrument (with one parameter)
+	MOVE, LEA, GET, PUT,
+	ENTER, LEAVE, CALL, SYSTEM
+};
+
+const char* machine_code_name[] = {
+	"EXIT", "PUSH", "POP",
+	"MOVE", "LEA", "GET", "PUT",
+	"ENTER", "LEAVE", "CALL", "SYSTEM"
+};
+
+inline bool machine_code_has_parameter(int code)
+{
+	return (code >= MOVE);
+}
 
 #define COLOR_NORMAL  "\x1B[0m"
 #define COLOR_RED     "\x1B[31m"
@@ -150,7 +165,7 @@ void add_label(string name)
 	labels.insert(make_pair(name, code.size()));
 }
 
-void add_assembly_code(CODE action, int param = 0)
+void add_assembly_code(machine_code action, int param = 0)
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
@@ -159,7 +174,7 @@ void add_assembly_code(CODE action, int param = 0)
 		it->second.second = code.size();
 	}
 	code.push_back(action);
-	if (CODE_WITH_PARAM[action]) {
+	if (machine_code_has_parameter(action)) {
 		if (action == LEA || action == PUT || action == GET) {
 			data_address.push_back(code.size());
 		}
@@ -514,11 +529,11 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	if (color) { fprintf(stderr, COLOR_BLUE); }
 	size_t i = mem[ip++];
 	if (i <= SYSTEM) { 
-		fprintf(stderr, "%s", CODE_TEXT[i]);
+		fprintf(stderr, "%s", machine_code_name[i]);
 	} else {
 		fprintf(stderr, "<Invalid-Code> (0x%08zX)", i);
 	}
-	if (CODE_WITH_PARAM[i]) {
+	if (machine_code_has_parameter(i)) {
 		size_t v = mem[ip++];
 		fprintf(stderr, "\t0x%08zX (%zd)", v, v);
 		if (i == LEA || i == PUT || i == GET || i == CALL || i == SYSTEM) {
