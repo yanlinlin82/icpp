@@ -340,7 +340,7 @@ int eval_number(string s)
 			break;
 		}
 	}
-	return n;
+	return (minus ? -n : n);
 }
 
 string eval_string(string s)
@@ -616,7 +616,6 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				fprintf(stderr, "Error: Invalid postfix!\n");
 				exit(1);
 			}
-			size_t n = stack.size();
 			auto b = stack.back(); stack.pop_back();
 			auto a = stack.back(); stack.pop_back();
 			auto [ a_val, a_type, a_the_type ] = a;
@@ -1022,9 +1021,9 @@ int show()
 	return 0;
 }
 
-void print_vm_env(size_t ax, size_t ip, size_t sp, size_t bp)
+void print_vm_env(int ax, int ip, int sp, int bp)
 {
-	fprintf(stderr, "\tax = %08zX, ip = %08zX, sp = %08zX, bp = %08zX\n", ax, ip, sp, bp);
+	fprintf(stderr, "\tax = %08X, ip = %08X, sp = %08X, bp = %08X\n", ax, ip, sp, bp);
 	fprintf(stderr, "\t[stack]: ");
 	size_t i = 0;
 	for (; i < 6 && sp + i < MEM_SIZE; ++i) {
@@ -1036,7 +1035,7 @@ void print_vm_env(size_t ax, size_t ip, size_t sp, size_t bp)
 	}
 	fprintf(stderr, "\n");
 	for (size_t i = 0; bp != MEM_SIZE; ++i) {
-		fprintf(stderr, "\t[#%zd backtrace]: %08zX\n", i, bp);
+		fprintf(stderr, "\t[#%zd backtrace]: %08X\n", i, bp);
 		if (bp == m[bp]) break;
 		bp = m[bp];
 	}
@@ -1174,7 +1173,7 @@ int run(int argc, const char** argv)
 	int t = sp;
 	m[--sp] = argc; // prepare stack for main() return
 	m[--sp] = static_cast<int>(reinterpret_cast<size_t>(argv)); // TODO: fix truncated
-	m[--sp] = bp;
+	m[--sp] = t;
 
 	size_t cycle = 0;
 	for (;;) {
