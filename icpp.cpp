@@ -42,14 +42,14 @@ enum machine_code {
 
 	// two-word instrument (with one parameter)
 	MOV,   LEA,   GET,  PUT,
-	ENTER, LEAVE, CALL, RET, SYS,
+	ENTER, LEAVE, CALL, RET
 };
 
 const char* machine_code_name[] = {
 	"EXIT",  "PUSH",  "POP",
 	"ADD",   "SUB",   "MUL",  "DIV", "MOD",
 	"MOV",   "LEA",   "GET",  "PUT",
-	"ENTER", "LEAVE", "CALL", "RET", "SYS"
+	"ENTER", "LEAVE", "CALL", "RET",
 };
 
 inline bool machine_code_has_parameter(int code)
@@ -482,7 +482,7 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	log("%zd\t", ip);
 	if (color) { log(COLOR_BLUE); }
 	size_t i = mem[ip++];
-	if (i <= SYS) {
+	if (i <= RET) {
 		log("%s", machine_code_name[i]);
 	} else {
 		log("<invalid-code> (0x%08zX)", i);
@@ -503,9 +503,6 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 		} else if (is_ext) {
 			stype = ext_symbol;
 			v -= ext_offset;
-		} else {
-			if (i == CALL) stype = code_symbol;
-			if (i == SYS) stype = ext_symbol;
 		}
 		auto it = offset_to_symbol[stype].find(v);
 		if (it != offset_to_symbol[stype].end()) {
@@ -625,11 +622,7 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 					print_error("symbol '%s' is not a function!\n", name.c_str());
 				}
 				add_assembly_code(PUSH, 0, false, false);
-				if (stype == code_symbol) {
-					add_assembly_code(CALL, offset, false, false);
-				} else {
-					add_assembly_code(SYS, offset, false, false);
-				}
+				add_assembly_code(CALL, offset, false, (stype == ext_symbol));
 				ret_type = the_ret_type;
 			}
 			stack.push_back(ret_type);
@@ -924,7 +917,7 @@ bool load(string filename)
 {
 	ifstream file(filename);
 	if (!file.is_open()) {
-		err("failed to open file '%s'!", filename.c_str());
+		err("failed to open file '%s'!\n", filename.c_str());
 		return false;
 	}
 	string line;
@@ -1064,23 +1057,13 @@ string get_symbol(symbol_type stype, size_t offset,
 	return it->second;
 }
 
-int system_call(size_t offset, int& sp, size_t data_offset, size_t ext_offset)
+auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset) -> pair<int, int> // [ ax, RET <n> ]
 {
-	auto func_name = get_symbol(ext_symbol, offset, 0, 0);
-	log<2>("[DEBUG] system_call: %s (%zd)\n", func_name.c_str(), offset);
-	if (func_name == "operator+(int,int)") {
-		int b = m[sp++];
-		int a = m[sp++];
-		return a + b;
-	} else if (func_name == "operator+(double,double)") {
-		int b = m[sp++];
-		int a = m[sp++];
-		return a + b;
-	} else if (func_name == "operator<<(ostream,int)"
-			|| func_name == "operator<<(ostream,double)") {
-		int b = m[sp++];
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
-		log<3>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
+	log<2>("[DEBUG] external call: %s\n", name.c_str());
+	if (name == "operator<<(ostream,int)") {
+		int b = m[sp + 1];
+		int a = m[sp + 2];
+		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		if (aa == "cout") {
 			cout << b;
 		} else if (aa == "cerr") {
@@ -1089,11 +1072,11 @@ int system_call(size_t offset, int& sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return a;
-	} else if (func_name == "operator<<(ostream,const char*)") {
-		int b = m[sp++]; string bb = get_symbol(data_symbol, b, data_offset, ext_offset);
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
-		log<3>("a = %s(%d), b = %s(%d)\n", aa.c_str(), a, bb.c_str(), b);
+		return make_pair(a, 2);
+	} else if (name == "operator<<(ostream,const char*)") {
+		int b = m[sp + 1];
+		int a = m[sp + 2];
+		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
 		if (aa == "cout") {
 			cout << s;
@@ -1103,11 +1086,10 @@ int system_call(size_t offset, int& sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return a;
-	} else if (func_name == "operator<<(ostream,(*)(endl))") {
-		int b = m[sp++];
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
-		log<3>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
+		return make_pair(a, 2);
+	} else if (name == "operator<<(ostream,(*)(endl))") {
+		int a = m[sp + 2];
+		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		if (aa == "cout") {
 			cout << endl;
 		} else if (aa == "cerr") {
@@ -1116,9 +1098,9 @@ int system_call(size_t offset, int& sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return a;
+		return make_pair(a, 2);
 	} else {
-		err("Unsupported function '%s'\n", func_name.c_str());
+		err("Unsupported function '%s'\n", name.c_str());
 		exit(1);
 	}
 }
@@ -1211,9 +1193,16 @@ int run(int argc, const char** argv)
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                } // leave stack frame
 		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];         } // call subroutine
 		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n; } // exit subroutine
-		else if (i == SYS  ) { ax = system_call(m[ip++], sp, data_offset, ext_offset); } // system call
 
 		else { warn("unknown instruction: '%zd'\n", i); }
+
+		if (static_cast<size_t>(ip) >= ext_offset) {
+			auto it = offset_to_symbol[ext_symbol].find(ip - ext_offset);
+			if (it != offset_to_symbol[ext_symbol].end()) {
+				auto [ r, n ] = call_ext(it->second, sp, data_offset, ext_offset);
+				ax = r; ip = m[sp++]; sp += n;
+			}
+		}
 	}
 	log<0>(COLOR_YELLOW "Total: %zd cycle(s), return %d\n" COLOR_NORMAL, cycle, ax);
 	return ax;
