@@ -120,14 +120,14 @@ string token;
 vector<pair<string, string>> stack;
 unordered_set<string> returned_functions;
 
-vector<int> code_section;
-vector<int> data_section;
+vector<int> code_sec;
+vector<int> data_sec;
 
 vector<int> reloc_table;
 vector<int> ext_table;
 
 enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
-const char* symbol_type_text[] = { "data", "code", "pseudo" };
+const char* symbol_type_text[] = { "data", "code", "ext" };
 unordered_map<string, tuple<symbol_type, size_t, size_t, string, string>> symbols; // name => { symbol_type, offset, size, type, ret_type }
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
@@ -181,16 +181,16 @@ void add_symbol(string name, symbol_type stype,
 
 size_t add_data_symbol(string name, vector<int> val, string type)
 {
-	size_t offset = data_section.size();
+	size_t offset = data_sec.size();
 	add_symbol(name, data_symbol, offset, val.size(), type, "");
-	data_section.insert(data_section.end(), val.begin(), val.end());
+	data_sec.insert(data_sec.end(), val.begin(), val.end());
 	return offset;
 }
 
 void add_code_symbol(string name, string args_type, string ret_type)
 {
 	override_functions[name].insert(name + args_type);
-	add_symbol(name + args_type, code_symbol, code_section.size(), 0, args_type, ret_type);
+	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type);
 }
 
 void add_external_symbol(string name, string args_type, string ret_type = "")
@@ -220,16 +220,16 @@ void add_assembly_code(machine_code action, int param, bool relocate, bool extra
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
-		offset.insert(make_pair(line_no, make_pair(code_section.size(), code_section.size())));
+		offset.insert(make_pair(line_no, make_pair(code_sec.size(), code_sec.size())));
 	} else {
-		it->second.second = code_section.size();
+		it->second.second = code_sec.size();
 	}
-	code_section.push_back(action);
+	code_sec.push_back(action);
 	if (machine_code_has_parameter(action)) {
-		size_t offset = code_section.size();
+		size_t offset = code_sec.size();
 		if (relocate) reloc_table.push_back(offset);
 		if (extranal) ext_table.push_back(offset);
-		code_section.push_back(param);
+		code_sec.push_back(param);
 	}
 }
 
@@ -1003,14 +1003,14 @@ int show()
 		if (it != offset.end()) {
 			log(COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
-				j = print_code(code_section, j, true, 0, 0);
+				j = print_code(code_sec, j, true, 0, 0);
 			}
 			log(COLOR_NORMAL);
 		}
 	}
 	log("\n");
 
-	for (size_t i = 0; i < data_section.size(); ++i) {
+	for (size_t i = 0; i < data_sec.size(); ++i) {
 		auto it = offset_to_symbol[data_symbol].find(i);
 		if (it != offset_to_symbol[data_symbol].end()) {
 			auto name = it->second;
@@ -1021,7 +1021,7 @@ int show()
 			log(COLOR_BLUE "\t.%s\t", data_type.c_str());
 			if (type == "const char*") {
 				log("\"");
-				const char* s = reinterpret_cast<const char*>(&data_section[offset]);
+				const char* s = reinterpret_cast<const char*>(&data_sec[offset]);
 				for (size_t i = 0; i < size * sizeof(int); ++i) {
 					switch (s[i]) {
 						default: log("%c", s[i]); break;
@@ -1036,7 +1036,7 @@ int show()
 				log("\"");
 			} else {
 				for (size_t i = 0; i < size; ++i) {
-					log("0x%08X", static_cast<unsigned int>(data_section[offset + i]));
+					log("0x%08X", static_cast<unsigned int>(data_sec[offset + i]));
 				}
 			}
 			log("\t; %s", name.c_str());
@@ -1179,28 +1179,24 @@ int run(int argc, const char** argv)
 	auto it2 = symbols.find(*(it->second.begin()));
 	ip = get<1>(it2->second);
 
-	if (verbose >= 1) {
-		log("\nSystem Information:\n");
-		log("  sizeof(int) = %zd\n", sizeof(int));
-		log("  sizeof(void*) = %zd\n", sizeof(void*));
-		log("\n");
+	log<1>("\nSystem Information:\n"
+			"  sizeof(int) = %zd\n"
+			"  sizeof(void*) = %zd\n"
+			"\n", sizeof(int), sizeof(void*));
 	}
 
 	// load code & data
-	log<1>("Loading program\n"
-			"  code: %zd byte(s)\n"
-			"  data: %zd byte(s)\n"
-			"\n",
-			code_section.size(), data_section.size());
+	log<1>("Loading program\n  code: %zd word(s)\n  data: %zd word(s)\n\n",
+			code_sec.size(), data_sec.size());
 
 	size_t offset = 0;
-	for (size_t i = 0; i < code_section.size(); ++i) {
-		m[offset++] = code_section[i];
+	for (size_t i = 0; i < code_sec.size(); ++i) {
+		m[offset++] = code_sec[i];
 	}
 	size_t data_offset = offset;
 	log<2>("data_offset = %zd\n", data_offset);
-	for (size_t i = 0; i < data_section.size(); ++i) {
-		m[offset++] = data_section[i];
+	for (size_t i = 0; i < data_sec.size(); ++i) {
+		m[offset++] = data_sec[i];
 	}
 	for (size_t i = 0; i < reloc_table.size(); ++i) {
 		log<2>("relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
