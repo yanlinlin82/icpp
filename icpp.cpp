@@ -998,34 +998,39 @@ int show()
 	}
 	log("\n");
 
-	for (auto [ name, x ] : symbols) {
-		auto [ stype, offset, size, type, ret_type ] = x;
-		if (stype != data_symbol) continue;
-		string data_type = "word";
-		if (ret_type == "string") data_type = "byte";
-		log(COLOR_YELLOW "%s:\t", name.c_str());
-		log(COLOR_BLUE ".%s\t%s\t", data_type.c_str(), type.c_str());
-		if (type == "string") {
-			log("\"");
-			const char* s = reinterpret_cast<const char*>(&data_section[offset]);
-			for (size_t i = 0; i < size * sizeof(int); ++i) {
-				switch (s[i]) {
-				default: log("%c", s[i]); break;
-				case '\t': log("\\t"); break;
-				case '\r': log("\\r"); break;
-				case '\n': log("\\n"); break;
-				case '\\': log("\\\\"); break;
-				case '\'': log("\\\'"); break;
-				case '\"': log("\\\""); break;
+	for (size_t i = 0; i < data_section.size(); ++i) {
+		auto it = offset_to_symbol[data_symbol].find(i);
+		if (it != offset_to_symbol[data_symbol].end()) {
+			auto name = it->second;
+			auto [ stype, offset, size, type, ret_type ] = symbols[name];
+			string data_type = "word";
+			if (type == "string") data_type = "byte";
+			log(COLOR_YELLOW "%d", i);
+			log(COLOR_BLUE "\t.%s\t", data_type.c_str());
+			if (type == "string") {
+				log("\"");
+				const char* s = reinterpret_cast<const char*>(&data_section[offset]);
+				for (size_t i = 0; i < size * sizeof(int); ++i) {
+					switch (s[i]) {
+						default: log("%c", s[i]); break;
+						case '\t': log("\\t"); break;
+						case '\r': log("\\r"); break;
+						case '\n': log("\\n"); break;
+						case '\\': log("\\\\"); break;
+						case '\'': log("\\\'"); break;
+						case '\"': log("\\\""); break;
+					}
+				}
+				log("\"");
+			} else {
+				for (size_t i = 0; i < size; ++i) {
+					log("0x%08X", static_cast<unsigned int>(data_section[offset + i]));
 				}
 			}
-			log("\"");
-		} else {
-			for (size_t i = 0; i < size; ++i) {
-				log("0x%08X", static_cast<unsigned int>(data_section[offset + i]));
-			}
+			log("\t; %s", name.c_str());
+			log("\t%s", type.c_str());
+			log(COLOR_NORMAL "\n");
 		}
-		log(COLOR_NORMAL "\n");
 	}
 	return 0;
 }
