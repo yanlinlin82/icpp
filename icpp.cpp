@@ -489,7 +489,7 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	} else {
 		log("<invalid-code> (0x%08zX)", i);
 	}
-	if (machine_code_has_parameter(i)) {
+	if (machine_code_has_parameter(i) && i != ENTER && i != LEAVE) {
 		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
 		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
 		size_t v = mem[ip++];
@@ -517,7 +517,11 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 				if (stype == data_symbol) {
 					log("\t; %s\t%s", it->second.c_str(), type_name.c_str());
 				} else {
-					log("\t; %s %s", ret_type.c_str(), it->second.c_str());
+					if (ret_type.empty()) {
+						log("\t; %s\t%s", it->second.c_str(), type_name.c_str());
+					} else {
+						log("\t; %s %s", ret_type.c_str(), it->second.c_str());
+					}
 				}
 			}
 		}
