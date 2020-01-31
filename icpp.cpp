@@ -211,13 +211,7 @@ string alloc_name()
 	return "@" + to_string(++counter);
 }
 
-size_t add_global_string(string s)
-{
-	auto mem = prepare_string(s);
-	return add_data_symbol(alloc_name(), mem, "string");
-}
-
-void add_assembly_code(machine_code action, int param = 0)
+void add_assembly_code(machine_code action, int param, bool relocate)
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
@@ -227,8 +221,7 @@ void add_assembly_code(machine_code action, int param = 0)
 	}
 	code_segment.push_back(action);
 	if (machine_code_has_parameter(action)) {
-		if (action == LEA || action == PUT || action == GET ||
-				action == ADDM || action == SUBM || action == MULM || action == DIVM || action == MODM) {
+		if (relocate) {
 			reloc_table.push_back(code_segment.size());
 		}
 		code_segment.push_back(param);
@@ -531,8 +524,9 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 		return make_tuple(v, mode_imm, "int");
 	} else if (type == text) {
 		string v = eval_string(s);
-		size_t offset = add_global_string(v);
-		return make_tuple(offset, mode_var, "string");
+		auto mem = prepare_string(v);
+		size_t offset = add_data_symbol(alloc_name(), mem, "const char*");
+		return make_tuple(offset, mode_imm, "const char*");
 	} else if (type == symbol) {
 		auto it = symbols.find(s);
 		if (it == symbols.end()) {
@@ -557,31 +551,31 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 void process_var_from_stack(int val, var_mode mode, string type_name)
 {
 	if (mode == mode_imm) { // immediate number
-		add_assembly_code(MOV, val);
+		add_assembly_code(MOV, val, (type_name != "int"));
 	} else if (mode == mode_var) { // variable
 		if (type_name == "int") {
-			add_assembly_code(GET, val);
+			add_assembly_code(GET, val, true);
 		} else {
-			add_assembly_code(LEA, val);
+			add_assembly_code(LEA, val, true);
 		}
 	} else { // stack saved value
-		add_assembly_code(GET, val);
+		add_assembly_code(GET, val, true);
 	}
-	add_assembly_code(PUSH);
+	add_assembly_code(PUSH, 0, false);
 }
 
 void process_two_number_op(machine_code op_n, machine_code op_m,
 		var_mode a_mode, int a_val, var_mode b_mode, int b_val)
 {
 	if (a_mode == mode_imm) {
-		add_assembly_code(MOV, a_val);
+		add_assembly_code(MOV, a_val, false);
 	} else {
-		add_assembly_code(GET, a_val);
+		add_assembly_code(GET, a_val, true);
 	}
 	if (b_mode == mode_imm) {
-		add_assembly_code(op_n, b_val);
+		add_assembly_code(op_n, b_val, false);
 	} else {
-		add_assembly_code(op_m, b_val);
+		add_assembly_code(op_m, b_val, true);
 	}
 }
 
@@ -651,16 +645,16 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				process_var_from_stack(a_val, a_type, a_type_name);
 				process_var_from_stack(b_val, b_type, b_type_name);
 				if (stype == code_symbol) {
-					add_assembly_code(CALL, offset);
+					add_assembly_code(CALL, offset, false);
 				} else {
-					add_assembly_code(SYS, offset);
+					add_assembly_code(SYS, offset, false);
 				}
 				ret_type = the_ret_type;
 			}
 			string var_name = alloc_name();
 			vector<int> dummy(1);
 			size_t var_offset = add_data_symbol(var_name, dummy, ret_type);
-			add_assembly_code(PUT, var_offset);
+			add_assembly_code(PUT, var_offset, true);
 			stack.push_back(make_tuple(var_offset, mode_stack, ret_type));
 		}
 	}
@@ -706,10 +700,10 @@ void parse_statements()
 		if (token != ";") {
 			auto postfix = parse_expression();
 			build_code(postfix);
-			add_assembly_code(PUSH);
+			add_assembly_code(PUSH, 0, false);
 		}
 		expect_token(";", "return");
-		add_assembly_code(LEAVE);
+		add_assembly_code(LEAVE, 0, false);
 		next();
 		if (stack.empty()) {
 			print_error("unexpected 'return' statement!\n");
@@ -882,7 +876,7 @@ void parse_source()
 		}
 		if (keyword == "function") {
 			if (returned_functions.find(name) == returned_functions.end()) {
-				add_assembly_code(LEAVE);
+				add_assembly_code(LEAVE, 0, false);
 			}
 		}
 		log<1>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
@@ -908,7 +902,7 @@ void parse_source()
 			expect_token("{", "function " + name);
 			string args_type = "(...)";
 			add_code_symbol(name, args_type, type_name);
-			add_assembly_code(ENTER, 0);
+			add_assembly_code(ENTER, 0, false);
 			next();
 		} else { // variable
 			for (;;) {
@@ -966,11 +960,11 @@ void init_symbol()
 	vector<int> dummy_cerr{2};
 	add_data_symbol("cerr", dummy_cerr, "ostream");
 
-	add_pseudo_symbol("endl",       "(*)(endl)",           "void");
-	add_pseudo_symbol("operator<<", "(ostream,int)",       "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,double)",    "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,string)",    "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,(*)(endl))", "ostream");
+	add_pseudo_symbol("endl",       "(*)(endl)",             "void");
+	add_pseudo_symbol("operator<<", "(ostream,int)",         "ostream");
+	add_pseudo_symbol("operator<<", "(ostream,double)",      "ostream");
+	add_pseudo_symbol("operator<<", "(ostream,const char*)", "ostream");
+	add_pseudo_symbol("operator<<", "(ostream,(*)(endl))",   "ostream");
 }
 
 bool parse()
@@ -1094,7 +1088,7 @@ int system_call(size_t offset, int& sp, size_t data_offset)
 			exit(1);
 		}
 		return a;
-	} else if (func_name == "operator<<(ostream,string)") {
+	} else if (func_name == "operator<<(ostream,const char*)") {
 		int b = m[sp++]; string bb = get_symbol(data_symbol, b, data_offset);
 		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
 		log<3>("a = %s(%d), b = %s(%d)\n", aa.c_str(), a, bb.c_str(), b);
