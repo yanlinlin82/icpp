@@ -357,7 +357,7 @@ pair<string, vector<int>> eval_item(const pair<token_type, string>& a)
 	} else if (a.first == text) {
 		string s = eval_string(a.second);
 		vector<int> a = prepare_string(s);
-		return make_pair("string", a);
+		return make_pair("const char*", a);
 	} else {
 		print_error("eval_item failed!\n");
 		exit(1);
@@ -997,10 +997,10 @@ int show()
 			auto name = it->second;
 			auto [ stype, offset, size, type, ret_type ] = symbols[name];
 			string data_type = "word";
-			if (type == "string") data_type = "byte";
+			if (type == "const char*") data_type = "byte";
 			log(COLOR_YELLOW "%d", i);
 			log(COLOR_BLUE "\t.%s\t", data_type.c_str());
-			if (type == "string") {
+			if (type == "const char*") {
 				log("\"");
 				const char* s = reinterpret_cast<const char*>(&data_section[offset]);
 				for (size_t i = 0; i < size * sizeof(int); ++i) {
