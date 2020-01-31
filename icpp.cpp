@@ -60,9 +60,9 @@ string token;
 vector<pair<string, string>> stack;
 unordered_set<string> returned_functions;
 
-vector<int> code;
-vector<int> data_address;
-vector<int> data2;
+vector<int> code_segment;
+vector<int> reloc_table;
+vector<int> data_section;
 
 enum symbol_type { data_symbol = 0, code_symbol, pseudo_symbol };
 const char* symbol_type_text[] = { "data", "code", "pseudo" };
@@ -70,7 +70,6 @@ unordered_map<string, tuple<symbol_type, size_t, size_t, string, string>> symbol
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
 
-unordered_map<string, size_t> labels; // label (symbol name) => offset
 unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start, offset_end ]
 
 void print_source_code_line(size_t n)
@@ -123,16 +122,16 @@ void do_add_symbol(string name, symbol_type stype,
 
 size_t add_data_symbol(string name, vector<int> val, string type)
 {
-	size_t offset = data2.size();
+	size_t offset = data_section.size();
 	do_add_symbol(name, data_symbol, offset, val.size(), type, "");
-	data2.insert(data2.end(), val.begin(), val.end());
+	data_section.insert(data_section.end(), val.begin(), val.end());
 	return offset;
 }
 
 void add_code_symbol(string name, string args_type, string ret_type)
 {
 	override_functions[name].insert(name + args_type);
-	do_add_symbol(name + args_type, code_symbol, code.size(), 0, args_type, ret_type);
+	do_add_symbol(name + args_type, code_symbol, code_segment.size(), 0, args_type, ret_type);
 }
 
 void add_pseudo_symbol(string name, string args_type, string ret_type)
@@ -164,26 +163,21 @@ size_t add_global_string(string s)
 	return add_data_symbol(alloc_name(), mem, "string");
 }
 
-void add_label(string name)
-{
-	labels.insert(make_pair(name, code.size()));
-}
-
 void add_assembly_code(machine_code action, int param = 0)
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
-		offset.insert(make_pair(line_no, make_pair(code.size(), code.size())));
+		offset.insert(make_pair(line_no, make_pair(code_segment.size(), code_segment.size())));
 	} else {
-		it->second.second = code.size();
+		it->second.second = code_segment.size();
 	}
-	code.push_back(action);
+	code_segment.push_back(action);
 	if (machine_code_has_parameter(action)) {
 		if (action == LEA || action == PUT || action == GET ||
 				action == ADDM || action == SUBM || action == MULM || action == DIVM || action == MODM) {
-			data_address.push_back(code.size());
+			reloc_table.push_back(code_segment.size());
 		}
-		code.push_back(param);
+		code_segment.push_back(param);
 	}
 }
 
@@ -693,7 +687,7 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				}
 				process_var_from_stack(a_val, a_type, a_the_type);
 				process_var_from_stack(b_val, b_type, b_the_type);
-				if (labels.find(name) != labels.end()) {
+				if (stype == code_symbol) {
 					add_assembly_code(CALL, offset);
 				} else {
 					add_assembly_code(SYSTEM, offset);
@@ -955,7 +949,6 @@ void parse_source()
 			expect_token("{", "function " + name);
 			string args_type = "(...)";
 			add_code_symbol(name, args_type, the_type);
-			add_label(name);
 			add_assembly_code(ENTER, 0);
 			next();
 		} else { // variable
@@ -1039,7 +1032,7 @@ int show()
 		if (it != offset.end()) {
 			fprintf(stderr, COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
-				j = print_code(code, j, true, 0);
+				j = print_code(code_segment, j, true, 0);
 			}
 			fprintf(stderr, COLOR_NORMAL);
 		}
@@ -1055,7 +1048,7 @@ int show()
 		fprintf(stderr, COLOR_BLUE ".%s\t%s\t", data_type.c_str(), type.c_str());
 		if (type == "string") {
 			fprintf(stderr, "\"");
-			const char* s = reinterpret_cast<const char*>(&data2[offset]);
+			const char* s = reinterpret_cast<const char*>(&data_section[offset]);
 			for (size_t i = 0; i < size * sizeof(int); ++i) {
 				switch (s[i]) {
 				default: fprintf(stderr, "%c", s[i]); break;
@@ -1070,7 +1063,7 @@ int show()
 			fprintf(stderr, "\"");
 		} else {
 			for (size_t i = 0; i < size; ++i) {
-				fprintf(stderr, "0x%08X", static_cast<unsigned int>(data2[offset + i]));
+				fprintf(stderr, "0x%08X", static_cast<unsigned int>(data_section[offset + i]));
 			}
 		}
 		fprintf(stderr, COLOR_NORMAL "\n");
@@ -1183,12 +1176,17 @@ int run(int argc, const char** argv)
 	// vm register
 	int ax = 0, ip = 0, sp = MEM_SIZE, bp = MEM_SIZE;
 
-	auto it = labels.find("main");
-	if (it == labels.end()) {
+	auto it = override_functions.find("main");
+	if (it == override_functions.end() || it->second.empty()) {
 		cerr << "Error: main() not defined!" << endl;
 		return -1;
 	}
-	ip = it->second;
+	if (it->second.size() > 1) {
+		cerr << "Error: duplcated definition of main()!" << endl;
+		return -1;
+	}
+	auto it2 = symbols.find(*(it->second.begin()));
+	ip = get<1>(it2->second);
 
 	if (verbose) {
 		fprintf(stderr, "\nSystem Information:\n");
@@ -1199,26 +1197,27 @@ int run(int argc, const char** argv)
 
 	// load code & data
 	if (verbose > 0) {
-		fprintf(stderr, "Loading program\n  code: %zd byte(s)\n  data: %zd byte(s)\n", code.size(), data2.size());
+		fprintf(stderr, "Loading program\n  code: %zd byte(s)\n  data: %zd byte(s)\n",
+				code_segment.size(), data_section.size());
 	}
 	size_t offset = 0;
-	for (size_t i = 0; i < code.size(); ++i) {
-		m[offset++] = code[i];
+	for (size_t i = 0; i < code_segment.size(); ++i) {
+		m[offset++] = code_segment[i];
 	}
 	size_t data_offset = offset;
 	if (verbose > 0) {
 		fprintf(stderr, "data_offset = %zd\n", data_offset);
 	}
-	for (size_t i = 0; i < data2.size(); ++i) {
-		m[offset++] = data2[i];
+	for (size_t i = 0; i < data_section.size(); ++i) {
+		m[offset++] = data_section[i];
 	}
-	for (size_t i = 0; i < data_address.size(); ++i) {
+	for (size_t i = 0; i < reloc_table.size(); ++i) {
 		if (verbose > 1) {
-			fprintf(stderr, "relocate: 0x%08X, 0x%08X", data_address[i], m[data_address[i]]);
+			fprintf(stderr, "relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
 		}
-		m[data_address[i]] += data_offset;
+		m[reloc_table[i]] += data_offset;
 		if (verbose > 1) {
-			fprintf(stderr, " => 0x%08X\n", m[data_address[i]]);
+			fprintf(stderr, " => 0x%08X\n", m[reloc_table[i]]);
 		}
 	}
 	if (verbose > 0) {
