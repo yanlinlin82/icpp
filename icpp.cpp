@@ -39,23 +39,23 @@ enum machine_code {
 	EXIT, PUSH, POP,
 
 	// two-word instrument (with one parameter)
-	MOVE,  LEA,   GET,   PUT,
+	MOV,   LEA,   GET,   PUT,
 	ADD,   SUB,   MUL,   DIV,   MOD,   // operation with an immediate number
 	ADDM,  SUBM,  MULM,  DIVM,  MODM,  // operation with a memory number
-	ENTER, LEAVE, CALL,  SYSTEM,
+	ENTER, LEAVE, CALL,  SYS,
 };
 
 const char* machine_code_name[] = {
 	"EXIT",  "PUSH",  "POP",
-	"MOVE",  "LEA",   "GET",   "PUT",
+	"MOV",   "LEA",   "GET",   "PUT",
 	"ADD",   "SUB",   "MUL",   "DIV",   "MOD",
 	"ADDM",  "SUBM",  "MULM",  "DIVM",  "MODM",
-	"ENTER", "LEAVE", "CALL",  "SYSTEM"
+	"ENTER", "LEAVE", "CALL",  "SYS"
 };
 
 inline bool machine_code_has_parameter(int code)
 {
-	return (code >= MOVE);
+	return (code >= MOV);
 }
 
 //--------------------------------------------------------//
@@ -110,7 +110,6 @@ unordered_map<string, int> operator_precedence = {
 enum token_type { unknown = 0, symbol, number, text, op };
 const char* token_type_text[] = { "unknown", "symbol", "number", "text", "op" };
 
-bool source = false;
 vector<string> src;
 const char* p = nullptr; // position of source code parsing
 size_t line_no = 0;
@@ -487,20 +486,20 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	log("%zd\t", ip);
 	if (color) { log(COLOR_BLUE); }
 	size_t i = mem[ip++];
-	if (i <= SYSTEM) { 
+	if (i <= SYS) {
 		log("%s", machine_code_name[i]);
 	} else {
-		log("<Invalid-Code> (0x%08zX)", i);
+		log("<invalid-code> (0x%08zX)", i);
 	}
 	if (machine_code_has_parameter(i)) {
 		size_t v = mem[ip++];
 		log("\t0x%08zX (%zd)", v, v);
 		if (i == LEA || i == GET || i == PUT ||
 				i == ADDM || i == SUBM || i == MULM || i == DIVM || i == MODM ||
-				i == CALL || i == SYSTEM) {
+				i == CALL || i == SYS) {
 			symbol_type stype = data_symbol;
 			if (i == CALL) stype = code_symbol;
-			if (i == SYSTEM) stype = pseudo_symbol;
+			if (i == SYS) stype = pseudo_symbol;
 			if (i == LEA || i == PUT || i == GET ||
 					i == ADDM || i == SUBM || i == MULM || i == DIVM || i == MODM) {
 				v -= data_offset;
@@ -511,8 +510,8 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 				if (stype == data_symbol) {
 					auto it2 = symbols.find(it->second);
 					if (it2 != symbols.end()) {
-						auto [ stype, offset, size, the_type, ret_type ] = it2->second;
-						log("\t%s", the_type.c_str());
+						auto [ stype, offset, size, type_name, ret_type ] = it2->second;
+						log("\t%s", type_name.c_str());
 					}
 				}
 			}
@@ -546,8 +545,8 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 				print_error("unknown symbol '%s'!\n", s.c_str());
 			}
 		}
-		auto [ stype, offset, size, the_type, ret_type ] = it->second;
-		return make_tuple(offset, mode_var, the_type);
+		auto [ stype, offset, size, type_name, ret_type ] = it->second;
+		return make_tuple(offset, mode_var, type_name);
 	} else {
 		log("error: unknown symbol type '%s' for '%s'\n",
 				token_type_text[type], s.c_str());
@@ -555,12 +554,12 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 	}
 }
 
-void process_var_from_stack(int val, var_mode mode, string the_type)
+void process_var_from_stack(int val, var_mode mode, string type_name)
 {
 	if (mode == mode_imm) { // immediate number
-		add_assembly_code(MOVE, val);
+		add_assembly_code(MOV, val);
 	} else if (mode == mode_var) { // variable
-		if (the_type == "int") {
+		if (type_name == "int") {
 			add_assembly_code(GET, val);
 		} else {
 			add_assembly_code(LEA, val);
@@ -575,7 +574,7 @@ void process_two_number_op(machine_code op_n, machine_code op_m,
 		var_mode a_mode, int a_val, var_mode b_mode, int b_val)
 {
 	if (a_mode == mode_imm) {
-		add_assembly_code(MOVE, a_val);
+		add_assembly_code(MOV, a_val);
 	} else {
 		add_assembly_code(GET, a_val);
 	}
@@ -595,16 +594,16 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 					postfix[i].second.c_str(), token_type_text[postfix[i].first]);
 		}
 	}
-	vector<tuple<int, var_mode, string>> stack; // [ { value/offset, mode, the_type } ]
+	vector<tuple<int, var_mode, string>> stack; // [ { value/offset, mode, type_name } ]
 	for (size_t i = 0; i < postfix.size(); ++i) {
 		if (postfix[i].first != op) {
 			auto v = process_var(postfix[i]);
 			if (verbose > 2) {
-				auto [ val, immedate, the_type ] = v;
+				auto [ val, immedate, type_name ] = v;
 				printf("[DEBUG] [%s:%s] => (%d:%s:%s)\n",
 						postfix[i].second.c_str(),
 						token_type_text[postfix[i].first],
-						val, (immedate ? "v" : "r"), the_type.c_str());
+						val, (immedate ? "v" : "r"), type_name.c_str());
 			}
 			stack.push_back(v);
 		} else {
@@ -614,12 +613,12 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 			}
 			auto b = stack.back(); stack.pop_back();
 			auto a = stack.back(); stack.pop_back();
-			auto [ a_val, a_type, a_the_type ] = a;
-			auto [ b_val, b_type, b_the_type ] = b;
+			auto [ a_val, a_type, a_type_name ] = a;
+			auto [ b_val, b_type, b_type_name ] = b;
 
 			string opr = postfix[i].second;
 			string ret_type;
-			if (a_the_type == "int" && b_the_type == "int") {
+			if (a_type_name == "int" && b_type_name == "int") {
 				if (opr == "+") {
 					process_two_number_op(ADD, ADDM, a_type, a_val, b_type, b_val);
 				} else if (opr == "-") {
@@ -635,26 +634,26 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				}
 				ret_type = "int";
 			} else {
-				string name = "operator" + opr + "(" + a_the_type + "," + b_the_type + ")";
+				string name = "operator" + opr + "(" + a_type_name + "," + b_type_name + ")";
 				auto it = symbols.find(name);
 				if (it == symbols.end()) {
 					print_error("Unknown function '%s'\n", name.c_str());
 				}
-				auto [ stype, offset, size, the_type, the_ret_type ] = it->second;
+				auto [ stype, offset, size, type_name, the_ret_type ] = it->second;
 				if (stype != code_symbol && stype != pseudo_symbol) {
 					print_error("symbol '%s' is not a function!\n", name.c_str());
 				}
 				if (verbose > 1) {
 					printf("[DEBUG] build_code => function: '%s'\n", name.c_str());
-					printf("[DEBUG]   a: %d, %d, %s\n", a_val, a_type, a_the_type.c_str());
-					printf("[DEBUG]   b: %d, %d, %s\n", b_val, b_type, b_the_type.c_str());
+					printf("[DEBUG]   a: %d, %d, %s\n", a_val, a_type, a_type_name.c_str());
+					printf("[DEBUG]   b: %d, %d, %s\n", b_val, b_type, b_type_name.c_str());
 				}
-				process_var_from_stack(a_val, a_type, a_the_type);
-				process_var_from_stack(b_val, b_type, b_the_type);
+				process_var_from_stack(a_val, a_type, a_type_name);
+				process_var_from_stack(b_val, b_type, b_type_name);
 				if (stype == code_symbol) {
 					add_assembly_code(CALL, offset);
 				} else {
-					add_assembly_code(SYSTEM, offset);
+					add_assembly_code(SYS, offset);
 				}
 				ret_type = the_ret_type;
 			}
@@ -715,10 +714,10 @@ void parse_statements()
 		if (stack.empty()) {
 			print_error("unexpected 'return' statement!\n");
 		}
-		string the_type = stack.back().first;
+		string type_name = stack.back().first;
 		string name = stack.back().second;
-		if (the_type != "function") {
-			print_error("unexpected 'return' statement! now it is in '%s':'%s'!\n", the_type.c_str(), name.c_str());
+		if (type_name != "function") {
+			print_error("unexpected 'return' statement! now it is in '%s':'%s'!\n", type_name.c_str(), name.c_str());
 		}
 		returned_functions.insert(name);
 	} else if (token == "typedef") {
@@ -788,16 +787,16 @@ bool is_built_in_type()
 			token == "signed" || token == "unsigned");
 }
 
-string parse_the_type()
+string parse_type_name()
 {
 	string prefix;
 	if (token == "static" || token == "extern") {
 		prefix = token;
 		next(); // skip this prefix
 	}
-	string the_type;
+	string type_name;
 	if (token == "auto") {
-		the_type = token; next();
+		type_name = token; next();
 	} else {
 		vector<pair<token_type, string>> a;
 		int angle_bracket = 0;
@@ -824,11 +823,11 @@ string parse_the_type()
 			}
 		}
 		for (auto e : a) {
-			the_type += (the_type.empty() ? "" : " ");
-			the_type += e.second;
+			type_name += (type_name.empty() ? "" : " ");
+			type_name += e.second;
 		}
 	}
-	return the_type;
+	return type_name;
 }
 
 void parse_source()
@@ -856,7 +855,7 @@ void parse_source()
 		parse_enum();
 	} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
 		string keyword = token;
-		next(); 
+		next();
 		string name = token;
 		next();
 		expect_token("{", keyword + " " + name);
@@ -891,12 +890,12 @@ void parse_source()
 	} else if (token == "auto" || token == "const" ||
 			token == "static" || token == "extern" ||
 			is_built_in_type()) { // start as type
-		string the_type = parse_the_type();
-		string type_prefix = the_type;
+		string type_name = parse_type_name();
+		string type_prefix = type_name;
 		string name = token; next();
 		if (verbose > 1) {
 			log("[DEBUG] => function/variable '%s', type='%s'\n",
-					name.c_str(), the_type.c_str());
+					name.c_str(), type_name.c_str());
 			if (verbose > 2) print_current();
 		}
 		if (token == "(") { // function
@@ -908,7 +907,7 @@ void parse_source()
 			stack.push_back(make_pair("function", name));
 			expect_token("{", "function " + name);
 			string args_type = "(...)";
-			add_code_symbol(name, args_type, the_type);
+			add_code_symbol(name, args_type, type_name);
 			add_assembly_code(ENTER, 0);
 			next();
 		} else { // variable
@@ -918,22 +917,22 @@ void parse_source()
 					next();
 					auto postfix = parse_expression(true);
 					if (can_be_evaluated(postfix)) {
-						auto val = evaluate_postfix(postfix, the_type);
+						auto val = evaluate_postfix(postfix, type_name);
 						init = val.second;
 					}
 				}
-				add_data_symbol(name, init, the_type);
+				add_data_symbol(name, init, type_name);
 				if (token != ",") break;
 				next();
-				the_type = type_prefix;
+				type_name = type_prefix;
 				while (token == "*" || token == "&") {
-					the_type += token;
+					type_name += token;
 					next();
 				}
 				name = token; next();
 				if (verbose > 1) {
 					log("[DEBUG] => another variable '%s', type='%s'\n",
-							name.c_str(), the_type.c_str());
+							name.c_str(), type_name.c_str());
 					if (verbose > 2) print_current();
 				}
 			}
@@ -1185,32 +1184,32 @@ int run(int argc, const char** argv)
 		}
 		size_t i = m[ip++];
 
-		if      (i == EXIT  ) { break;                                      } // exit the program
+		if      (i == EXIT) { break;            } // exit the program
 
-		else if (i == PUSH  ) { m[--sp] = ax;                               } // push ax to stack
-		else if (i == POP   ) { ax = m[sp++];                               } // pop ax from stack
+		else if (i == PUSH) { m[--sp] = ax;     } // push ax to stack
+		else if (i == POP ) { ax = m[sp++];     } // pop ax from stack
 
-		else if (i == MOVE  ) { ax = m[ip++];                               } // move immediate to ax
-		else if (i == LEA   ) { ax = m[ip++];                               } // load address to ax
-		else if (i == GET   ) { ax = m[m[ip++]];                            } // get memory to ax
-		else if (i == PUT   ) { m[m[ip++]] = ax;                            } // put ax to memory
+		else if (i == MOV ) { ax = m[ip++];     } // move immediate to ax
+		else if (i == LEA ) { ax = m[ip++];     } // load address to ax
+		else if (i == GET ) { ax = m[m[ip++]];  } // get memory to ax
+		else if (i == PUT ) { m[m[ip++]] = ax;  } // put ax to memory
 
-		else if (i == ADD ) { ax += m[ip++];                                } // add number to ax
-		else if (i == SUB ) { ax -= m[ip++];                                } // substract number from ax
-		else if (i == MUL ) { ax *= m[ip++];                                } // multiply ax by number
-		else if (i == DIV ) { ax /= m[ip++];                                } // devide ax by number
-		else if (i == MOD ) { ax %= m[ip++];                                } // devide ax and get mode
+		else if (i == ADD ) { ax += m[ip++];    } // add number to ax
+		else if (i == SUB ) { ax -= m[ip++];    } // substract number from ax
+		else if (i == MUL ) { ax *= m[ip++];    } // multiply ax by number
+		else if (i == DIV ) { ax /= m[ip++];    } // devide ax by number
+		else if (i == MOD ) { ax %= m[ip++];    } // devide ax and get mode
 
-		else if (i == ADDM ) { ax += m[m[ip++]];                            } // add number to ax
-		else if (i == SUBM ) { ax -= m[m[ip++]];                            } // substract number from ax
-		else if (i == MULM ) { ax *= m[m[ip++]];                            } // multiply ax by number
-		else if (i == DIVM ) { ax /= m[m[ip++]];                            } // devide ax by number
-		else if (i == MODM ) { ax %= m[m[ip++]];                            } // devide ax and get mode
+		else if (i == ADDM) { ax += m[m[ip++]]; } // add number to ax
+		else if (i == SUBM) { ax -= m[m[ip++]]; } // substract number from ax
+		else if (i == MULM) { ax *= m[m[ip++]]; } // multiply ax by number
+		else if (i == DIVM) { ax /= m[m[ip++]]; } // devide ax by number
+		else if (i == MODM) { ax %= m[m[ip++]]; } // devide ax and get mode
 
-		else if (i == ENTER ) { m[--sp] = bp; bp = sp; sp = sp - m[ip++];   } // enter subroutine
-		else if (i == LEAVE ) { sp = bp; bp = m[sp++]; ip = m[sp++];        } // leave subroutine
-		else if (i == CALL  ) { m[--sp] = ip + 1; ip = m[ip];               } // call subroutine
-		else if (i == SYSTEM) { ax = system_call(m[ip++], sp, data_offset); } // system call
+		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp = sp - m[ip++];   } // enter subroutine
+		else if (i == LEAVE) { sp = bp; bp = m[sp++]; ip = m[sp++];        } // leave subroutine
+		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];               } // call subroutine
+		else if (i == SYS  ) { ax = system_call(m[ip++], sp, data_offset); } // system call
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 	}
@@ -1220,11 +1219,12 @@ int run(int argc, const char** argv)
 
 int main(int argc, const char** argv)
 {
+	bool assembly = false;
 	const char* filename = nullptr;
 	for (int i = 1; i < argc; ++i) {
 		if (argv[i][0] == '-') {
 			if (argv[i][1] == 'v') { ++verbose; }
-			if (argv[i][1] == 's') { source = true; }
+			if (argv[i][1] == 's') { assembly = true; }
 		} else {
 			filename = argv[i];
 		}
@@ -1234,5 +1234,5 @@ int main(int argc, const char** argv)
 		return false;
 	}
 	if (!load(filename) || !parse()) return -1;
-	return source ? show() : run(argc, argv);
+	return assembly ? show() : run(argc, argv);
 }
