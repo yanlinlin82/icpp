@@ -36,11 +36,8 @@ const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
 enum machine_code {
-	// single-word instrument (without parameter)
-	EXIT, PUSH, POP,
-	ADD,  SUB,  MUL, DIV, MOD,
-
-	// two-word instrument (with one parameter)
+	EXIT,  PUSH,  POP,
+	ADD,   SUB,   MUL,  DIV, MOD,
 	MOV,   LEA,   GET,  PUT,
 	ENTER, LEAVE, CALL, RET
 };
@@ -54,7 +51,8 @@ const char* machine_code_name[] = {
 
 inline bool machine_code_has_parameter(int code)
 {
-	return (code >= MOV);
+	return (code == MOV || code == LEA || code == GET || code == PUT ||
+			code == ENTER || code == CALL || code == RET);
 }
 
 //--------------------------------------------------------//
