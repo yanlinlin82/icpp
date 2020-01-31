@@ -120,17 +120,21 @@ string token;
 vector<pair<string, string>> stack;
 unordered_set<string> returned_functions;
 
-vector<int> code_segment;
-vector<int> reloc_table;
+vector<int> code_section;
 vector<int> data_section;
 
-enum symbol_type { data_symbol = 0, code_symbol, pseudo_symbol };
+vector<int> reloc_table;
+vector<int> ext_table;
+
+enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
 const char* symbol_type_text[] = { "data", "code", "pseudo" };
 unordered_map<string, tuple<symbol_type, size_t, size_t, string, string>> symbols; // name => { symbol_type, offset, size, type, ret_type }
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
 
 unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start, offset_end ]
+
+size_t ext_symbol_counter = 0;
 
 void print_source_code_line(size_t n)
 {
@@ -186,15 +190,15 @@ size_t add_data_symbol(string name, vector<int> val, string type)
 void add_code_symbol(string name, string args_type, string ret_type)
 {
 	override_functions[name].insert(name + args_type);
-	add_symbol(name + args_type, code_symbol, code_segment.size(), 0, args_type, ret_type);
+	add_symbol(name + args_type, code_symbol, code_section.size(), 0, args_type, ret_type);
 }
 
-void add_pseudo_symbol(string name, string args_type, string ret_type)
+void add_external_symbol(string name, string args_type, string ret_type = "")
 {
-	static size_t counter = 0;
-	size_t offset = ++counter;
-	override_functions[name].insert(name + args_type);
-	add_symbol(name + args_type, pseudo_symbol, offset, 0, args_type, ret_type);
+	size_t offset = ++ext_symbol_counter;
+	string name2 = name + (ret_type.empty() ? "" : args_type);
+	override_functions[name].insert(name2);
+	add_symbol(name2, ext_symbol, offset, 0, args_type, ret_type);
 }
 
 vector<int> prepare_string(const string& s)
@@ -212,20 +216,20 @@ string alloc_name()
 	return "@" + to_string(++counter);
 }
 
-void add_assembly_code(machine_code action, int param, bool relocate)
+void add_assembly_code(machine_code action, int param, bool relocate, bool extranal)
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
-		offset.insert(make_pair(line_no, make_pair(code_segment.size(), code_segment.size())));
+		offset.insert(make_pair(line_no, make_pair(code_section.size(), code_section.size())));
 	} else {
-		it->second.second = code_segment.size();
+		it->second.second = code_section.size();
 	}
-	code_segment.push_back(action);
+	code_section.push_back(action);
 	if (machine_code_has_parameter(action)) {
-		if (relocate) {
-			reloc_table.push_back(code_segment.size());
-		}
-		code_segment.push_back(param);
+		size_t offset = code_section.size();
+		if (relocate) reloc_table.push_back(offset);
+		if (extranal) ext_table.push_back(offset);
+		code_section.push_back(param);
 	}
 }
 
@@ -408,7 +412,7 @@ bool can_be_evaluated(const vector<pair<token_type, string>>& a)
 vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 {
 	log<2>("%s:\n", __FUNCTION__);
-	if (verbose > 3) print_current();
+	if (verbose >= 3) print_current();
 
 	vector<string> stack{"#"};
 	vector<pair<token_type, string>> postfix;
@@ -474,7 +478,7 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 	return postfix;
 }
 
-size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset)
+size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
 {
 	if (color) { log(COLOR_YELLOW); }
 	log("%zd\t", ip);
@@ -487,22 +491,33 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	}
 	if (machine_code_has_parameter(i)) {
 		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
+		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
 		size_t v = mem[ip++];
 		if (color && is_reloc) log(COLOR_GREEN);
+		if (color && is_ext) log(COLOR_RED);
 		log("\t0x%08zX (%zd)", v, v);
-		if (color && is_reloc) log(COLOR_BLUE);
+		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
+
 		symbol_type stype = data_symbol;
-		if (i == CALL) stype = code_symbol;
-		if (i == SYS) stype = pseudo_symbol;
-		if (is_reloc) { v -= data_offset; }
+		if (is_reloc) {
+			stype = data_symbol;
+			v -= data_offset;
+		} else if (is_ext) {
+			stype = ext_symbol;
+			v -= ext_offset;
+		} else {
+			if (i == CALL) stype = code_symbol;
+			if (i == SYS) stype = ext_symbol;
+		}
 		auto it = offset_to_symbol[stype].find(v);
 		if (it != offset_to_symbol[stype].end()) {
-			log("\t; %s", it->second.c_str());
-			if (stype == data_symbol) {
-				auto it2 = symbols.find(it->second);
-				if (it2 != symbols.end()) {
-					auto [ stype, offset, size, type_name, ret_type ] = it2->second;
-					log("\t%s", type_name.c_str());
+			auto it2 = symbols.find(it->second);
+			if (it2 != symbols.end()) {
+				auto [ stype, offset, size, type_name, ret_type ] = it2->second;
+				if (stype == data_symbol) {
+					log("\t; %s\t%s", it->second.c_str(), type_name.c_str());
+				} else {
+					log("\t; %s %s", ret_type.c_str(), it->second.c_str());
 				}
 			}
 		}
@@ -511,19 +526,19 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	return ip;
 }
 
-enum var_mode { mode_imm = 0, mode_var = 1, mode_stack = 2 };
+enum var_mode { mode_imm = 0, mode_var, mode_func, mode_stack };
 
-tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
+tuple<int, var_mode, string, string> process_var(const pair<token_type, string>& x)
 {
 	auto [ type, s ] = x;
 	if (type == number) {
 		int v = eval_number(s);
-		return make_tuple(v, mode_imm, "int");
+		return make_tuple(v, mode_imm, "int", "");
 	} else if (type == text) {
 		string v = eval_string(s);
 		auto mem = prepare_string(v);
 		size_t offset = add_data_symbol(alloc_name(), mem, "const char*");
-		return make_tuple(offset, mode_imm, "const char*");
+		return make_tuple(offset, mode_imm, "const char*", "");
 	} else if (type == symbol) {
 		auto it = symbols.find(s);
 		if (it == symbols.end()) {
@@ -537,7 +552,8 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 			}
 		}
 		auto [ stype, offset, size, type_name, ret_type ] = it->second;
-		return make_tuple(offset, mode_var, type_name);
+		var_mode mode = (stype == data_symbol ? mode_var : mode_func);
+		return make_tuple(offset, mode, type_name, ret_type);
 	} else {
 		log("error: unknown symbol type '%s' for '%s'\n",
 				token_type_text[type], s.c_str());
@@ -548,15 +564,18 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 void process_var_from_stack(int val, var_mode mode, string type_name)
 {
 	if (mode == mode_imm) { // immediate number
-		add_assembly_code(MOV, val, (type_name != "int"));
-		add_assembly_code(PUSH, 0, false);
+		add_assembly_code(MOV, val, (type_name != "int"), false);
+		add_assembly_code(PUSH, 0, false, false);
 	} else if (mode == mode_var) { // variable
 		if (type_name == "int") {
-			add_assembly_code(GET, val, true);
+			add_assembly_code(GET, val, true, false);
 		} else {
-			add_assembly_code(LEA, val, true);
+			add_assembly_code(LEA, val, true, false);
 		}
-		add_assembly_code(PUSH, 0, false);
+		add_assembly_code(PUSH, 0, false, false);
+	} else if (mode == mode_func) { // function (address)
+		add_assembly_code(LEA, val, false, true);
+		add_assembly_code(PUSH, 0, false, false);
 	}
 }
 
@@ -564,36 +583,37 @@ void process_two_number_op(machine_code op_n, machine_code op_m,
 		var_mode a_mode, int a_val, var_mode b_mode, int b_val)
 {
 	if (a_mode == mode_imm) {
-		add_assembly_code(MOV, a_val, false);
+		add_assembly_code(MOV, a_val, false, false);
 	} else {
-		add_assembly_code(GET, a_val, true);
+		add_assembly_code(GET, a_val, true, false);
 	}
 	if (b_mode == mode_imm) {
-		add_assembly_code(op_n, b_val, false);
+		add_assembly_code(op_n, b_val, false, false);
 	} else {
-		add_assembly_code(op_m, b_val, true);
+		add_assembly_code(op_m, b_val, true, false);
 	}
 }
 
 void build_code(const vector<pair<token_type, string>>& postfix)
 {
-	if (verbose > 1) {
+	if (verbose >= 2) {
 		log("[DEBUG] => build_code - expression [%zd]\n", postfix.size());
 		for (size_t i = 0; i < postfix.size(); ++i) {
 			log("[DEBUG]   (%zd) '%s' (type = %s)\n", i + 1,
 					postfix[i].second.c_str(), token_type_text[postfix[i].first]);
 		}
 	}
-	vector<tuple<int, var_mode, string>> stack; // [ { value/offset, mode, type_name } ]
+	vector<tuple<int, var_mode, string, string>> stack; // [ { stype, value/offset, mode, type_name, ret_type } ]
 	for (size_t i = 0; i < postfix.size(); ++i) {
 		if (postfix[i].first != op) {
 			auto v = process_var(postfix[i]);
-			if (verbose > 2) {
-				auto [ val, immedate, type_name ] = v;
-				printf("[DEBUG] [%s:%s] => (%d:%s:%s)\n",
+			if (verbose >= 2) {
+				auto [ val, immedate, type_name, ret_type ] = v;
+				printf("[DEBUG] [%s:%s] => (%d:%s:%s:%s)\n",
 						postfix[i].second.c_str(),
 						token_type_text[postfix[i].first],
-						val, (immedate ? "v" : "r"), type_name.c_str());
+						val, (immedate ? "v" : "r"),
+						type_name.c_str(), ret_type.c_str());
 			}
 			stack.push_back(v);
 		} else {
@@ -603,8 +623,8 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 			}
 			auto b = stack.back(); stack.pop_back();
 			auto a = stack.back(); stack.pop_back();
-			auto [ a_val, a_type, a_type_name ] = a;
-			auto [ b_val, b_type, b_type_name ] = b;
+			auto [ a_val, a_type, a_type_name, a_ret_type ] = a;
+			auto [ b_val, b_type, b_type_name, b_ret_type ] = b;
 
 			string opr = postfix[i].second;
 			string ret_type;
@@ -624,32 +644,34 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				}
 				ret_type = "int";
 			} else {
-				string name = "operator" + opr + "(" + a_type_name + "," + b_type_name + ")";
+				string name = "operator" + opr + "(" +
+					(a_ret_type.empty() ? "" : "(*)") + a_type_name + "," +
+					(b_ret_type.empty() ? "" : "(*)") + b_type_name + ")";
+				if (verbose >= 2) {
+					printf("[DEBUG] build_code => function: '%s'\n", name.c_str());
+					printf("[DEBUG]   a: %d, %d, %s\n", a_val, a_type, a_type_name.c_str());
+					printf("[DEBUG]   b: %d, %d, %s\n", b_val, b_type, b_type_name.c_str());
+				}
 				auto it = symbols.find(name);
 				if (it == symbols.end()) {
 					print_error("Unknown function '%s'\n", name.c_str());
 				}
 				auto [ stype, offset, size, type_name, the_ret_type ] = it->second;
-				if (stype != code_symbol && stype != pseudo_symbol) {
+				if (stype != code_symbol && stype != ext_symbol) {
 					print_error("symbol '%s' is not a function!\n", name.c_str());
-				}
-				if (verbose > 1) {
-					printf("[DEBUG] build_code => function: '%s'\n", name.c_str());
-					printf("[DEBUG]   a: %d, %d, %s\n", a_val, a_type, a_type_name.c_str());
-					printf("[DEBUG]   b: %d, %d, %s\n", b_val, b_type, b_type_name.c_str());
 				}
 				process_var_from_stack(a_val, a_type, a_type_name);
 				process_var_from_stack(b_val, b_type, b_type_name);
 				if (stype == code_symbol) {
-					add_assembly_code(CALL, offset, false);
+					add_assembly_code(CALL, offset, false, false);
 				} else {
-					add_assembly_code(SYS, offset, false);
+					add_assembly_code(SYS, offset, false, false);
 				}
 				ret_type = the_ret_type;
 			}
 			if (i + 1 < postfix.size()) {
-				add_assembly_code(PUSH, 0, false);
-				stack.push_back(make_tuple(0, mode_stack, ret_type));
+				add_assembly_code(PUSH, 0, false, false);
+				stack.push_back(make_tuple(0, mode_stack, ret_type, ""));
 			}
 		}
 	}
@@ -658,7 +680,7 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 void parse_statements()
 {
 	log<2>("[DEBUG] %s\n", __FUNCTION__);
-	if (verbose > 3) print_current();
+	if (verbose >= 3) print_current();
 	if (token == "{") {
 		next(); while (!token.empty() && token != "}") parse_statements();
 		expect_token("}", "{");
@@ -695,10 +717,10 @@ void parse_statements()
 		if (token != ";") {
 			auto postfix = parse_expression();
 			build_code(postfix);
-			add_assembly_code(PUSH, 0, false);
+			add_assembly_code(PUSH, 0, false, false);
 		}
 		expect_token(";", "return");
-		add_assembly_code(LEAVE, 0, false);
+		add_assembly_code(LEAVE, 0, false, false);
 		next();
 		if (stack.empty()) {
 			print_error("unexpected 'return' statement!\n");
@@ -749,7 +771,7 @@ void parse_enum()
 			value = token;
 			next();
 		}
-		if (verbose > 1) {
+		if (verbose >= 2) {
 			log("[DEBUG] enum %s: %s", name.c_str(), enum_key.c_str());
 			if (!value.empty()) {
 				log(" = %s", value.c_str());
@@ -821,25 +843,25 @@ string parse_type_name()
 
 void parse_source()
 {
-	if (verbose > 1) {
+	if (verbose >= 2) {
 		log("[DEBUG] parse_source(), line_no = %zd, token=\"%s\", type=%s, stack=[",
 				line_no, token.c_str(), token_type_text[type]);
 		for (size_t i = 0; i < stack.size(); ++i) {
 			log("(%s|%s)", stack[i].first.c_str(), stack[i].second.c_str());
 		}
 		log("]\n");
-		if (verbose > 2) print_current();
+		if (verbose >= 3) print_current();
 	}
 
 	if (token == "using") {
 		next(); while (!token.empty() && token != ";") next();
 		if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
 		next();
-		log<1>("[DEBUG] => 'using' statement skipped\n");
+		log<2>("[DEBUG] => 'using' statement skipped\n");
 	} else if (token == "typedef") {
 		skip_until(";", token);
 		next();
-		log<1>("[DEBUG] => 'typedef' statement skipped\n");
+		log<2>("[DEBUG] => 'typedef' statement skipped\n");
 	} else if (token == "enum") {
 		parse_enum();
 	} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
@@ -850,17 +872,17 @@ void parse_source()
 		expect_token("{", keyword + " " + name);
 		stack.push_back(make_pair(keyword, name));
 		next();
-		log<1>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
+		log<2>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
 	} else if (token == "template") {
 		skip_until(";", token);
 		next();
-		log<1>("[DEBUG] => 'template' statement skipped\n");
+		log<2>("[DEBUG] => 'template' statement skipped\n");
 	} else if (token == ";") {
 		next();
 		if (!stack.empty()) {
 			stack.pop_back();
 		}
-		log<1>("[DEBUG] => ';' - end of statement\n");
+		log<2>("[DEBUG] => ';' - end of statement\n");
 	} else if (token == "}") {
 		string keyword;
 		string name;
@@ -871,10 +893,10 @@ void parse_source()
 		}
 		if (keyword == "function") {
 			if (returned_functions.find(name) == returned_functions.end()) {
-				add_assembly_code(LEAVE, 0, false);
+				add_assembly_code(LEAVE, 0, false, false);
 			}
 		}
-		log<1>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
+		log<2>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
 		next();
 	} else if (token == "auto" || token == "const" ||
 			token == "static" || token == "extern" ||
@@ -882,10 +904,10 @@ void parse_source()
 		string type_name = parse_type_name();
 		string type_prefix = type_name;
 		string name = token; next();
-		if (verbose > 1) {
+		if (verbose >= 2) {
 			log("[DEBUG] => function/variable '%s', type='%s'\n",
 					name.c_str(), type_name.c_str());
-			if (verbose > 2) print_current();
+			if (verbose >= 3) print_current();
 		}
 		if (token == "(") { // function
 			if (!stack.empty() && stack.back().first != "function") {
@@ -897,7 +919,7 @@ void parse_source()
 			expect_token("{", "function " + name);
 			string args_type = "(...)";
 			add_code_symbol(name, args_type, type_name);
-			add_assembly_code(ENTER, 0, false);
+			add_assembly_code(ENTER, 0, false, false);
 			next();
 		} else { // variable
 			for (;;) {
@@ -919,10 +941,10 @@ void parse_source()
 					next();
 				}
 				name = token; next();
-				if (verbose > 1) {
+				if (verbose >= 2) {
 					log("[DEBUG] => another variable '%s', type='%s'\n",
 							name.c_str(), type_name.c_str());
-					if (verbose > 2) print_current();
+					if (verbose >= 3) print_current();
 				}
 			}
 			expect_token(";", "variable");
@@ -950,16 +972,13 @@ bool load(string filename)
 
 void init_symbol()
 {
-	vector<int> dummy_cout{1};
-	add_data_symbol("cout", dummy_cout, "ostream");
-	vector<int> dummy_cerr{2};
-	add_data_symbol("cerr", dummy_cerr, "ostream");
-
-	add_pseudo_symbol("endl",       "(*)(endl)",             "void");
-	add_pseudo_symbol("operator<<", "(ostream,int)",         "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,double)",      "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,const char*)", "ostream");
-	add_pseudo_symbol("operator<<", "(ostream,(*)(endl))",   "ostream");
+	add_external_symbol("cout", "ostream");
+	add_external_symbol("cerr", "ostream");
+	add_external_symbol("endl", "(endl)", "void");
+	add_external_symbol("operator<<", "(ostream,int)",         "ostream");
+	add_external_symbol("operator<<", "(ostream,double)",      "ostream");
+	add_external_symbol("operator<<", "(ostream,const char*)", "ostream");
+	add_external_symbol("operator<<", "(ostream,(*)(endl))",   "ostream");
 }
 
 bool parse()
@@ -980,7 +999,7 @@ int show()
 		if (it != offset.end()) {
 			log(COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
-				j = print_code(code_segment, j, true, 0);
+				j = print_code(code_section, j, true, 0, 0);
 			}
 			log(COLOR_NORMAL);
 		}
@@ -1021,6 +1040,20 @@ int show()
 			log(COLOR_NORMAL "\n");
 		}
 	}
+
+	log<2>("relocate table:\n");
+	for (size_t i = 0; i < reloc_table.size(); ++i) {
+		log<2>("\t0x%08x", reloc_table[i]);
+		if (i % 5 == 4) log<2>("\n");
+	}
+	if (reloc_table.size() % 5 != 0) log<2>("\n");
+
+	log<2>("external table:\n");
+	for (size_t i = 0; i < ext_table.size(); ++i) {
+		log<2>("\t0x%08x", ext_table[i]);
+		if (i % 5 == 4) log<2>("\n");
+	}
+	if (ext_table.size() % 5 != 0) log<2>("\n");
 	return 0;
 }
 
@@ -1046,9 +1079,18 @@ void print_vm_env(int ax, int ip, int sp, int bp)
 	return;
 }
 
-string get_symbol(symbol_type stype, size_t offset, size_t data_offset)
+string get_symbol(symbol_type stype, size_t offset,
+		size_t data_offset, size_t ext_offset)
 {
-	auto it = offset_to_symbol[stype].find(offset - data_offset);
+	size_t original_offset = offset;
+	if (original_offset >= ext_offset) {
+		original_offset -= ext_offset;
+		stype = ext_symbol;
+	} else if (original_offset >= data_offset) {
+		original_offset -= data_offset;
+		stype = data_symbol;
+	}
+	auto it = offset_to_symbol[stype].find(original_offset);
 	if (it == offset_to_symbol[stype].end()) {
 		err("Unknown symbol offset '%zd' (stype = '%s')\n",
 				offset, symbol_type_text[stype]);
@@ -1057,10 +1099,10 @@ string get_symbol(symbol_type stype, size_t offset, size_t data_offset)
 	return it->second;
 }
 
-int system_call(size_t offset, int& sp, size_t data_offset)
+int system_call(size_t offset, int& sp, size_t data_offset, size_t ext_offset)
 {
-	auto func_name = get_symbol(pseudo_symbol, offset, 0);
-	log<1>("[DEBUG] system_call: %s (%zd)\n", func_name.c_str(), offset);
+	auto func_name = get_symbol(ext_symbol, offset, 0, 0);
+	log<2>("[DEBUG] system_call: %s (%zd)\n", func_name.c_str(), offset);
 	if (func_name == "operator+(int,int)") {
 		int b = m[sp++];
 		int a = m[sp++];
@@ -1072,11 +1114,11 @@ int system_call(size_t offset, int& sp, size_t data_offset)
 	} else if (func_name == "operator<<(ostream,int)"
 			|| func_name == "operator<<(ostream,double)") {
 		int b = m[sp++];
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
-		log<2>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
-		if (m[a] == 1) {
+		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
+		log<3>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
+		if (aa == "cout") {
 			cout << b;
-		} else if (m[a] == 2) {
+		} else if (aa == "cerr") {
 			cerr << b;
 		} else {
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
@@ -1084,13 +1126,13 @@ int system_call(size_t offset, int& sp, size_t data_offset)
 		}
 		return a;
 	} else if (func_name == "operator<<(ostream,const char*)") {
-		int b = m[sp++]; string bb = get_symbol(data_symbol, b, data_offset);
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
+		int b = m[sp++]; string bb = get_symbol(data_symbol, b, data_offset, ext_offset);
+		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		log<3>("a = %s(%d), b = %s(%d)\n", aa.c_str(), a, bb.c_str(), b);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
-		if (m[a] == 1) {
+		if (aa == "cout") {
 			cout << s;
-		} else if (m[a] == 2) {
+		} else if (aa == "cerr") {
 			cerr << s;
 		} else {
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
@@ -1099,11 +1141,11 @@ int system_call(size_t offset, int& sp, size_t data_offset)
 		return a;
 	} else if (func_name == "operator<<(ostream,(*)(endl))") {
 		int b = m[sp++];
-		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
-		log<1>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
-		if (m[a] == 1) {
+		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
+		log<3>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
+		if (aa == "cout") {
 			cout << endl;
-		} else if (m[a] == 2) {
+		} else if (aa == "cerr") {
 			cerr << endl;
 		} else {
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
@@ -1133,7 +1175,7 @@ int run(int argc, const char** argv)
 	auto it2 = symbols.find(*(it->second.begin()));
 	ip = get<1>(it2->second);
 
-	if (verbose) {
+	if (verbose >= 1) {
 		log("\nSystem Information:\n");
 		log("  sizeof(int) = %zd\n", sizeof(int));
 		log("  sizeof(void*) = %zd\n", sizeof(void*));
@@ -1141,11 +1183,15 @@ int run(int argc, const char** argv)
 	}
 
 	// load code & data
-	log<1>("Loading program\n  code: %zd byte(s)\n  data: %zd byte(s)\n",
-			code_segment.size(), data_section.size());
+	log<1>("Loading program\n"
+			"  code: %zd byte(s)\n"
+			"  data: %zd byte(s)\n"
+			"\n",
+			code_section.size(), data_section.size());
+
 	size_t offset = 0;
-	for (size_t i = 0; i < code_segment.size(); ++i) {
-		m[offset++] = code_segment[i];
+	for (size_t i = 0; i < code_section.size(); ++i) {
+		m[offset++] = code_section[i];
 	}
 	size_t data_offset = offset;
 	log<2>("data_offset = %zd\n", data_offset);
@@ -1156,6 +1202,13 @@ int run(int argc, const char** argv)
 		log<2>("relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
 		m[reloc_table[i]] += data_offset;
 		log<2>(" => 0x%08X\n", m[reloc_table[i]]);
+	}
+	size_t ext_offset = offset;
+	log<2>("ext_offset = %zd\n", ext_offset);
+	for (size_t i = 0; i < ext_table.size(); ++i) {
+		log<2>("external: 0x%08X, 0x%08X", ext_table[i], m[ext_table[i]]);
+		m[ext_table[i]] += ext_offset;
+		log<2>(" => 0x%08X\n", m[ext_table[i]]);
 	}
 	log<2>("\n");
 
@@ -1169,10 +1222,10 @@ int run(int argc, const char** argv)
 	size_t cycle = 0;
 	for (;;) {
 		++cycle;
-		if (verbose > 0) {
+		if (verbose >= 1) {
 			log("%zd:\t", cycle);
-			print_code(m, ip, false, data_offset);
-			if (verbose > 1) {
+			print_code(m, ip, false, data_offset, ext_offset);
+			if (verbose >= 2) {
 				print_vm_env(ax, ip, sp, bp);
 			}
 		}
@@ -1203,7 +1256,7 @@ int run(int argc, const char** argv)
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp = sp - m[ip++];   } // enter subroutine
 		else if (i == LEAVE) { sp = bp; bp = m[sp++]; ip = m[sp++];        } // leave subroutine
 		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];               } // call subroutine
-		else if (i == SYS  ) { ax = system_call(m[ip++], sp, data_offset); } // system call
+		else if (i == SYS  ) { ax = system_call(m[ip++], sp, data_offset, ext_offset); } // system call
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 	}
