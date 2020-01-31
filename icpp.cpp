@@ -68,7 +68,7 @@ unordered_map<string, int> operator_precedence = {
 	//{ "++", 2 }, { "--", 2 }, { "{", 2 }, { "[", 2 }, { ".", 2 }, { "->", 2 },
 
 	// prefix
-	{ "++", 3 }, { "--", 3 }, { "+", 3 }, { "-", 3 },
+	{ "++", 3 }, { "--", 3 }, /*{ "+", 3 }, { "-", 3 },*/
 	{ "!", 3 }, { "~", 3 }, { "*", 3 }, { "&", 3 },
 
 	{ ".*", 4 }, { "->*", 4 },
@@ -889,9 +889,13 @@ void parse_source()
 					if (can_be_evaluated(postfix)) {
 						auto val = evaluate_postfix(postfix, type_name);
 						init = val.second;
+						add_data_symbol(name, init, type_name);
+					} else {
+						size_t offset = add_data_symbol(name, init, type_name);
+						build_code(postfix);
+						add_assembly_code(PUT, offset, true, false);
 					}
 				}
-				add_data_symbol(name, init, type_name);
 				if (token != ",") break;
 				next();
 				type_name = type_prefix;
@@ -1208,8 +1212,8 @@ int run(int argc, const char** argv)
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 	}
-	log<1>("Total: %zd cycle(s), return %d\n", cycle, ax);
-	return m[sp];
+	log<0>(COLOR_YELLOW "Total: %zd cycle(s), return %d\n" COLOR_NORMAL, cycle, ax);
+	return ax;
 }
 
 int main(int argc, const char** argv)
