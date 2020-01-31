@@ -491,20 +491,18 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 		if (color && is_reloc) log(COLOR_GREEN);
 		log("\t0x%08zX (%zd)", v, v);
 		if (color && is_reloc) log(COLOR_BLUE);
-		if (is_reloc) {
-			symbol_type stype = data_symbol;
-			if (i == CALL) stype = code_symbol;
-			if (i == SYS) stype = pseudo_symbol;
-			v -= data_offset;
-			auto it = offset_to_symbol[stype].find(v);
-			if (it != offset_to_symbol[stype].end()) {
-				log("\t; %s", it->second.c_str());
-				if (stype == data_symbol) {
-					auto it2 = symbols.find(it->second);
-					if (it2 != symbols.end()) {
-						auto [ stype, offset, size, type_name, ret_type ] = it2->second;
-						log("\t%s", type_name.c_str());
-					}
+		symbol_type stype = data_symbol;
+		if (i == CALL) stype = code_symbol;
+		if (i == SYS) stype = pseudo_symbol;
+		if (is_reloc) { v -= data_offset; }
+		auto it = offset_to_symbol[stype].find(v);
+		if (it != offset_to_symbol[stype].end()) {
+			log("\t; %s", it->second.c_str());
+			if (stype == data_symbol) {
+				auto it2 = symbols.find(it->second);
+				if (it2 != symbols.end()) {
+					auto [ stype, offset, size, type_name, ret_type ] = it2->second;
+					log("\t%s", type_name.c_str());
 				}
 			}
 		}
@@ -551,16 +549,15 @@ void process_var_from_stack(int val, var_mode mode, string type_name)
 {
 	if (mode == mode_imm) { // immediate number
 		add_assembly_code(MOV, val, (type_name != "int"));
+		add_assembly_code(PUSH, 0, false);
 	} else if (mode == mode_var) { // variable
 		if (type_name == "int") {
 			add_assembly_code(GET, val, true);
 		} else {
 			add_assembly_code(LEA, val, true);
 		}
-	} else { // stack saved value
-		add_assembly_code(GET, val, true);
+		add_assembly_code(PUSH, 0, false);
 	}
-	add_assembly_code(PUSH, 0, false);
 }
 
 void process_two_number_op(machine_code op_n, machine_code op_m,
@@ -650,11 +647,10 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				}
 				ret_type = the_ret_type;
 			}
-			string var_name = alloc_name();
-			vector<int> dummy(1);
-			size_t var_offset = add_data_symbol(var_name, dummy, ret_type);
-			add_assembly_code(PUT, var_offset, true);
-			stack.push_back(make_tuple(var_offset, mode_stack, ret_type));
+			if (i + 1 < postfix.size()) {
+				add_assembly_code(PUSH, 0, false);
+				stack.push_back(make_tuple(0, mode_stack, ret_type));
+			}
 		}
 	}
 }
