@@ -38,18 +38,18 @@ vector<int> m(MEM_SIZE);
 enum machine_code {
 	// single-word instrument (without parameter)
 	EXIT, PUSH, POP,
-	ADD,  SUB,  MUL,  DIV,  MOD,
+	ADD,  SUB,  MUL, DIV, MOD,
 
 	// two-word instrument (with one parameter)
-	MOV,   LEA,   GET,   PUT,
-	ENTER, LEAVE, CALL,  SYS,
+	MOV,   LEA,   GET,  PUT,
+	ENTER, LEAVE, CALL, RET, SYS,
 };
 
 const char* machine_code_name[] = {
 	"EXIT",  "PUSH",  "POP",
-	"ADD",   "SUB",   "MUL",   "DIV",   "MOD",
-	"MOV",   "LEA",   "GET",   "PUT",
-	"ENTER", "LEAVE", "CALL",  "SYS"
+	"ADD",   "SUB",   "MUL",  "DIV", "MOD",
+	"MOV",   "LEA",   "GET",  "PUT",
+	"ENTER", "LEAVE", "CALL", "RET", "SYS"
 };
 
 inline bool machine_code_has_parameter(int code)
@@ -680,6 +680,7 @@ void parse_statements()
 		}
 		expect_token(";", "return");
 		add_assembly_code(LEAVE, 0, false, false);
+		add_assembly_code(RET, 0, false, false);
 		next();
 		if (stack.empty()) {
 			print_error("unexpected 'return' statement!\n");
@@ -853,6 +854,7 @@ void parse_source()
 		if (keyword == "function") {
 			if (returned_functions.find(name) == returned_functions.end()) {
 				add_assembly_code(LEAVE, 0, false, false);
+				add_assembly_code(RET, 0, false, false);
 			}
 		}
 		log<2>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
@@ -1205,9 +1207,10 @@ int run(int argc, const char** argv)
 		else if (i == DIV ) { ax = m[sp++] / ax; } // stack (top) / a
 		else if (i == MOD ) { ax = m[sp++] % ax; } // stack (top) % a
 
-		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp = sp - m[ip++]; } // enter subroutine
-		else if (i == LEAVE) { sp = bp; bp = m[sp++]; ip = m[sp++];      } // leave subroutine
-		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];             } // call subroutine
+		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++]; } // enter stack frame
+		else if (i == LEAVE) { sp = bp; bp = m[sp++];                } // leave stack frame
+		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];         } // call subroutine
+		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n; } // exit subroutine
 		else if (i == SYS  ) { ax = system_call(m[ip++], sp, data_offset, ext_offset); } // system call
 
 		else { warn("unknown instruction: '%zd'\n", i); }
