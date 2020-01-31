@@ -8,6 +8,28 @@
 #include <unordered_map>
 using namespace std;
 
+//--------------------------------------------------------//
+// message print
+
+#define COLOR_NORMAL "\x1B[0m"
+#define COLOR_RED    "\x1B[31m"
+#define COLOR_GREEN  "\x1B[32m"
+#define COLOR_YELLOW "\x1B[33m"
+#define COLOR_BLUE   "\x1B[34m"
+
+int verbose = 0;
+
+template <int level = 0> inline int log(const char* fmt, va_list ap) { return (verbose < level) ? 0 : vfprintf(stderr, fmt, ap); }
+template <int level = 0> inline int log(const char* fmt, ...) { va_list ap; va_start(ap, fmt); return log<level>(fmt, ap); }
+
+inline void err(const char* fmt, va_list ap) { log(COLOR_RED "Error: "); log(fmt, ap); log(COLOR_NORMAL); }
+inline void err(const char* fmt, ...) { va_list ap; va_start(ap, fmt); err(fmt, ap); }
+
+inline void warn(const char* fmt, va_list ap) { log(COLOR_YELLOW "Warning: "); log(fmt, ap); log(COLOR_NORMAL); }
+inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); warn(fmt, ap); }
+
+//--------------------------------------------------------//
+
 const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
@@ -35,21 +57,12 @@ inline bool machine_code_has_parameter(int code)
 	return (code >= MOVE);
 }
 
-#define COLOR_NORMAL  "\x1B[0m"
-#define COLOR_RED     "\x1B[31m"
-#define COLOR_GREEN   "\x1B[32m"
-#define COLOR_YELLOW  "\x1B[33m"
-#define COLOR_BLUE    "\x1B[34m"
-#define COLOR_MAGENTA "\x1B[35m"
-#define COLOR_CYAN    "\x1B[36m"
-#define COLOR_WHITE   "\x1B[37m"
 
 enum token_type { unknown = 0, symbol, number, text, op };
 const char* token_type_text[] = { "unknown", "symbol", "number", "text", "op" };
 
 unordered_map<string, int> o; // operation precedence
 
-int verbose = 0;
 bool source = false;
 vector<string> src;
 const char* p = nullptr; // position of source code parsing
@@ -74,32 +87,29 @@ unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start
 
 void print_source_code_line(size_t n)
 {
-	fprintf(stderr, "%4zd ", n + 1);
+	log("%4zd ", n + 1);
 	for (const char* p = src[n].c_str(); *p; ++p) {
-		if (*p == '\t') fprintf(stderr, "    "); else fprintf(stderr, "%c", *p);
+		if (*p == '\t') log("    "); else log("%c", *p);
 	}
-	fprintf(stderr, "\n");
+	log("\n");
 }
 
 void print_current()
 {
 	print_source_code_line(line_no - 1);
-	fprintf(stderr, "     ");
+	log("     ");
 	for (const char* q = src[line_no - 1].c_str(); *q && q + token.size() != p; ++q) {
-		if (*q == '\t') fprintf(stderr, "    "); else fprintf(stderr, " ");
+		if (*q == '\t') log("    "); else log(" ");
 	}
 	for (size_t i = 0; i < token.size(); ++i) {
-		fprintf(stderr, "^");
+		log("^");
 	}
-	fprintf(stderr, "--(token='%s',type='%s')\n", token.c_str(), token_type_text[type]);
+	log("--(token='%s',type='%s')\n", token.c_str(), token_type_text[type]);
 }
 
 void print_error(const char* fmt, ...)
 {
-	va_list ap;
-	va_start(ap, fmt);
-	fprintf(stderr, "Error: ");
-	vfprintf(stderr, fmt, ap);
+	va_list ap; va_start(ap, fmt); err(fmt, ap);
 	print_current();
 	exit(1);
 }
@@ -107,11 +117,9 @@ void print_error(const char* fmt, ...)
 void do_add_symbol(string name, symbol_type stype,
 		size_t offset, size_t size, string type, string ret_type)
 {
-	if (verbose > 2) {
-		fprintf(stderr, "[DEBUG] add symbol: ('%s', %s, %zd, %zd, '%s', '%s')\n",
-				name.c_str(), symbol_type_text[stype],
-				offset, size, type.c_str(), ret_type.c_str());
-	}
+	log<2>("[DEBUG] add symbol: ('%s', %s, %zd, %zd, '%s', '%s')\n",
+			name.c_str(), symbol_type_text[stype],
+			offset, size, type.c_str(), ret_type.c_str());
 	symbols[name] = make_tuple(stype, offset, size, type, ret_type);
 	if (offset_to_symbol[stype].find(offset) != offset_to_symbol[stype].end()) {
 		print_error("offset %zd has already existsed! existed '%s', now adding '%s'\n",
@@ -328,15 +336,6 @@ string code_vector_to_string(const vector<pair<token_type, string>>& a)
 	return s;
 }
 
-void dump(const vector<string>& stack, const vector<pair<token_type, string>>& postfix)
-{
-	fprintf(stderr, "> token='%s', type=%s, stack=", token.c_str(), token_type_text[type]);
-	cout << vector_to_string(stack);
-	fprintf(stderr, ", postfix=");
-	cout << code_vector_to_string(postfix);
-	fprintf(stderr, "\n");
-}
-
 int eval_number(string s)
 {
 	int n = 0;
@@ -437,19 +436,17 @@ bool can_be_evaluated(const vector<pair<token_type, string>>& a)
 
 vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 {
-	if (verbose > 2) {
-		fprintf(stderr, "%s:\n", __FUNCTION__);
-		if (verbose > 3) print_current();
-	}
+	log<2>("%s:\n", __FUNCTION__);
+	if (verbose > 3) print_current();
 
 	vector<string> stack{"#"};
 	vector<pair<token_type, string>> postfix;
 	bool last_is_num = false;
 	bool last_is_symbol = false;
 	for (; !token.empty(); next()) {
-		if (verbose > 2) {
-			dump(stack, postfix);
-		}
+		log<2>("> token='%s', type=%s, stack=%s, postfix=%s\n",
+				token.c_str(), token_type_text[type],
+				vector_to_string(stack).c_str(), code_vector_to_string(postfix).c_str());
 		if (type != op) {
 			postfix.push_back(make_pair(type, token));
 			last_is_num = true;
@@ -482,11 +479,9 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 			stack.pop_back(); // pop out "("
 		} else {
 			if (token == "," && before_comma) break;
-			if (verbose > 2) {
-				printf("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
-						token.c_str(), precedence(token),
-						stack.back().c_str(), precedence(stack.back()));
-			}
+			log<2>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
+					token.c_str(), precedence(token),
+					stack.back().c_str(), precedence(stack.back()));
 			while (precedence(token) >= precedence(stack.back()) &&
 					stack.back() != "#") {
 				postfix.push_back(make_pair(op, stack.back()));
@@ -504,37 +499,24 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 		postfix.push_back(make_pair(op, stack.back()));
 		stack.pop_back();
 	}
-	if (verbose > 2) {
-		fprintf(stderr, "expression parsed, postfix=");
-		cout << code_vector_to_string(postfix) << endl;
-	}
+	log<2>("expression parsed, postfix=%s\n", code_vector_to_string(postfix).c_str());
 	return postfix;
-}
-
-void dump_postfix(string where, const vector<pair<token_type, string>>& postfix)
-{
-	if (verbose > 1) {
-		fprintf(stderr, "[DEBUG] => %s - expression [%zd]\n", where.c_str(), postfix.size());
-		for (size_t i = 0; i < postfix.size(); ++i) {
-			fprintf(stderr, "[DEBUG]   (%zd) '%s' (type = %s)\n", i + 1, postfix[i].second.c_str(), token_type_text[postfix[i].first]);
-		}
-	}
 }
 
 size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset)
 {
-	if (color) { fprintf(stderr, COLOR_YELLOW); }
-	fprintf(stderr, "%zd\t", ip);
-	if (color) { fprintf(stderr, COLOR_BLUE); }
+	if (color) { log(COLOR_YELLOW); }
+	log("%zd\t", ip);
+	if (color) { log(COLOR_BLUE); }
 	size_t i = mem[ip++];
 	if (i <= SYSTEM) { 
-		fprintf(stderr, "%s", machine_code_name[i]);
+		log("%s", machine_code_name[i]);
 	} else {
-		fprintf(stderr, "<Invalid-Code> (0x%08zX)", i);
+		log("<Invalid-Code> (0x%08zX)", i);
 	}
 	if (machine_code_has_parameter(i)) {
 		size_t v = mem[ip++];
-		fprintf(stderr, "\t0x%08zX (%zd)", v, v);
+		log("\t0x%08zX (%zd)", v, v);
 		if (i == LEA || i == GET || i == PUT ||
 				i == ADDM || i == SUBM || i == MULM || i == DIVM || i == MODM ||
 				i == CALL || i == SYSTEM) {
@@ -547,18 +529,18 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 			}
 			auto it = offset_to_symbol[stype].find(v);
 			if (it != offset_to_symbol[stype].end()) {
-				fprintf(stderr, "\t; %s", it->second.c_str());
+				log("\t; %s", it->second.c_str());
 				if (stype == data_symbol) {
 					auto it2 = symbols.find(it->second);
 					if (it2 != symbols.end()) {
 						auto [ stype, offset, size, the_type, ret_type ] = it2->second;
-						fprintf(stderr, "\t%s", the_type.c_str());
+						log("\t%s", the_type.c_str());
 					}
 				}
 			}
 		}
 	}
-	fprintf(stderr, "\n");
+	log("\n");
 	return ip;
 }
 
@@ -589,7 +571,7 @@ tuple<int, var_mode, string> process_var(const pair<token_type, string>& x)
 		auto [ stype, offset, size, the_type, ret_type ] = it->second;
 		return make_tuple(offset, mode_var, the_type);
 	} else {
-		fprintf(stderr, "error: unknown symbol type '%s' for '%s'\n",
+		log("error: unknown symbol type '%s' for '%s'\n",
 				token_type_text[type], s.c_str());
 		exit(1);
 	}
@@ -629,7 +611,11 @@ void process_two_number_op(machine_code op_n, machine_code op_m,
 void build_code(const vector<pair<token_type, string>>& postfix)
 {
 	if (verbose > 1) {
-		dump_postfix("build_code", postfix);
+		log("[DEBUG] => build_code - expression [%zd]\n", postfix.size());
+		for (size_t i = 0; i < postfix.size(); ++i) {
+			log("[DEBUG]   (%zd) '%s' (type = %s)\n", i + 1,
+					postfix[i].second.c_str(), token_type_text[postfix[i].first]);
+		}
 	}
 	vector<tuple<int, var_mode, string>> stack; // [ { value/offset, mode, the_type } ]
 	for (size_t i = 0; i < postfix.size(); ++i) {
@@ -645,7 +631,7 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 			stack.push_back(v);
 		} else {
 			if (stack.size() < 2) {
-				fprintf(stderr, "Error: Invalid postfix!\n");
+				err("Invalid postfix!\n");
 				exit(1);
 			}
 			auto b = stack.back(); stack.pop_back();
@@ -705,10 +691,8 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 
 void parse_statements()
 {
-	if (verbose > 2) {
-		fprintf(stderr, "[DEBUG] %s\n", __FUNCTION__);
-		if (verbose > 3) print_current();
-	}
+	log<2>("[DEBUG] %s\n", __FUNCTION__);
+	if (verbose > 3) print_current();
 	if (token == "{") {
 		next(); while (!token.empty() && token != "}") parse_statements();
 		expect_token("}", "{");
@@ -800,11 +784,11 @@ void parse_enum()
 			next();
 		}
 		if (verbose > 1) {
-			fprintf(stderr, "[DEBUG] enum %s: %s", name.c_str(), enum_key.c_str());
+			log("[DEBUG] enum %s: %s", name.c_str(), enum_key.c_str());
 			if (!value.empty()) {
-				fprintf(stderr, " = %s", value.c_str());
+				log(" = %s", value.c_str());
 			}
-			fprintf(stderr, "\n");
+			log("\n");
 		}
 
 		if (token == "}") break;
@@ -815,9 +799,7 @@ void parse_enum()
 	next(); // skip '}'
 	expect_token(";", "enum " + name);
 	next(); // skip ';'
-	if (verbose > 1) {
-		fprintf(stderr, "[DEBUG] end of enum %s\n", name.c_str());
-	}
+	log<1>("[DEBUG] end of enum %s\n", name.c_str());
 }
 
 bool is_built_in_type()
@@ -874,12 +856,12 @@ string parse_the_type()
 void parse_source()
 {
 	if (verbose > 1) {
-		fprintf(stderr, "[DEBUG] parse_source(), line_no = %zd, token=\"%s\", type=%s, stack=[",
+		log("[DEBUG] parse_source(), line_no = %zd, token=\"%s\", type=%s, stack=[",
 				line_no, token.c_str(), token_type_text[type]);
 		for (size_t i = 0; i < stack.size(); ++i) {
-			fprintf(stderr, "(%s|%s)", stack[i].first.c_str(), stack[i].second.c_str());
+			log("(%s|%s)", stack[i].first.c_str(), stack[i].second.c_str());
 		}
-		fprintf(stderr, "]\n");
+		log("]\n");
 		if (verbose > 2) print_current();
 	}
 
@@ -887,11 +869,11 @@ void parse_source()
 		next(); while (!token.empty() && token != ";") next();
 		if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
 		next();
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => 'using' statement skipped\n");
+		log<1>("[DEBUG] => 'using' statement skipped\n");
 	} else if (token == "typedef") {
 		skip_until(";", token);
 		next();
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => 'typedef' statement skipped\n");
+		log<1>("[DEBUG] => 'typedef' statement skipped\n");
 	} else if (token == "enum") {
 		parse_enum();
 	} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
@@ -902,17 +884,17 @@ void parse_source()
 		expect_token("{", keyword + " " + name);
 		stack.push_back(make_pair(keyword, name));
 		next();
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
+		log<1>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
 	} else if (token == "template") {
 		skip_until(";", token);
 		next();
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => 'template' statement skipped\n");
+		log<1>("[DEBUG] => 'template' statement skipped\n");
 	} else if (token == ";") {
 		next();
 		if (!stack.empty()) {
 			stack.pop_back();
 		}
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => ';' - end of statement\n");
+		log<1>("[DEBUG] => ';' - end of statement\n");
 	} else if (token == "}") {
 		string keyword;
 		string name;
@@ -926,7 +908,7 @@ void parse_source()
 				add_assembly_code(LEAVE);
 			}
 		}
-		if (verbose > 1) fprintf(stderr, "[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
+		log<1>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
 		next();
 	} else if (token == "auto" || token == "const" ||
 			token == "static" || token == "extern" ||
@@ -935,7 +917,7 @@ void parse_source()
 		string type_prefix = the_type;
 		string name = token; next();
 		if (verbose > 1) {
-			fprintf(stderr, "[DEBUG] => function/variable '%s', type='%s'\n",
+			log("[DEBUG] => function/variable '%s', type='%s'\n",
 					name.c_str(), the_type.c_str());
 			if (verbose > 2) print_current();
 		}
@@ -972,7 +954,7 @@ void parse_source()
 				}
 				name = token; next();
 				if (verbose > 1) {
-					fprintf(stderr, "[DEBUG] => another variable '%s', type='%s'\n",
+					log("[DEBUG] => another variable '%s', type='%s'\n",
 							name.c_str(), the_type.c_str());
 					if (verbose > 2) print_current();
 				}
@@ -989,7 +971,7 @@ bool load(string filename)
 {
 	ifstream file(filename);
 	if (!file.is_open()) {
-		cerr << "failed to open file '" << filename << "'!" << endl;
+		err("failed to open file '%s'!", filename.c_str());
 		return false;
 	}
 	string line;
@@ -1030,66 +1012,66 @@ int show()
 		print_source_code_line(i);
 		auto it = offset.find(i + 1);
 		if (it != offset.end()) {
-			fprintf(stderr, COLOR_BLUE);
+			log(COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
 				j = print_code(code_segment, j, true, 0);
 			}
-			fprintf(stderr, COLOR_NORMAL);
+			log(COLOR_NORMAL);
 		}
 	}
-	fprintf(stderr, "\n");
+	log("\n");
 
 	for (auto [ name, x ] : symbols) {
 		auto [ stype, offset, size, type, ret_type ] = x;
 		if (stype != data_symbol) continue;
 		string data_type = "word";
 		if (ret_type == "string") data_type = "byte";
-		fprintf(stderr, COLOR_YELLOW "%s:\t", name.c_str());
-		fprintf(stderr, COLOR_BLUE ".%s\t%s\t", data_type.c_str(), type.c_str());
+		log(COLOR_YELLOW "%s:\t", name.c_str());
+		log(COLOR_BLUE ".%s\t%s\t", data_type.c_str(), type.c_str());
 		if (type == "string") {
-			fprintf(stderr, "\"");
+			log("\"");
 			const char* s = reinterpret_cast<const char*>(&data_section[offset]);
 			for (size_t i = 0; i < size * sizeof(int); ++i) {
 				switch (s[i]) {
-				default: fprintf(stderr, "%c", s[i]); break;
-				case '\t': fprintf(stderr, "\\t"); break;
-				case '\r': fprintf(stderr, "\\r"); break;
-				case '\n': fprintf(stderr, "\\n"); break;
-				case '\\': fprintf(stderr, "\\\\"); break;
-				case '\'': fprintf(stderr, "\\\'"); break;
-				case '\"': fprintf(stderr, "\\\""); break;
+				default: log("%c", s[i]); break;
+				case '\t': log("\\t"); break;
+				case '\r': log("\\r"); break;
+				case '\n': log("\\n"); break;
+				case '\\': log("\\\\"); break;
+				case '\'': log("\\\'"); break;
+				case '\"': log("\\\""); break;
 				}
 			}
-			fprintf(stderr, "\"");
+			log("\"");
 		} else {
 			for (size_t i = 0; i < size; ++i) {
-				fprintf(stderr, "0x%08X", static_cast<unsigned int>(data_section[offset + i]));
+				log("0x%08X", static_cast<unsigned int>(data_section[offset + i]));
 			}
 		}
-		fprintf(stderr, COLOR_NORMAL "\n");
+		log(COLOR_NORMAL "\n");
 	}
 	return 0;
 }
 
 void print_vm_env(int ax, int ip, int sp, int bp)
 {
-	fprintf(stderr, "\tax = %08X, ip = %08X, sp = %08X, bp = %08X\n", ax, ip, sp, bp);
-	fprintf(stderr, "\t[stack]: ");
+	log("\tax = %08X, ip = %08X, sp = %08X, bp = %08X\n", ax, ip, sp, bp);
+	log("\t[stack]: ");
 	size_t i = 0;
 	for (; i < 6 && sp + i < MEM_SIZE; ++i) {
-		if (i > 0) { fprintf(stderr, ", "); }
-		fprintf(stderr, "0x%08X", m[sp + i]);
+		if (i > 0) { log(", "); }
+		log("0x%08X", m[sp + i]);
 	}
 	if (sp + i < MEM_SIZE) {
-		fprintf(stderr, ", ...");
+		log(", ...");
 	}
-	fprintf(stderr, "\n");
+	log("\n");
 	for (size_t i = 0; bp != MEM_SIZE; ++i) {
-		fprintf(stderr, "\t[#%zd backtrace]: %08X\n", i, bp);
+		log("\t[#%zd backtrace]: %08X\n", i, bp);
 		if (bp == m[bp]) break;
 		bp = m[bp];
 	}
-	fprintf(stderr, "\n");
+	log("\n");
 	return;
 }
 
@@ -1097,7 +1079,7 @@ string get_symbol(symbol_type stype, size_t offset, size_t data_offset)
 {
 	auto it = offset_to_symbol[stype].find(offset - data_offset);
 	if (it == offset_to_symbol[stype].end()) {
-		fprintf(stderr, "Error: Unknown symbol offset '%zd' (stype = '%s')\n",
+		err("Unknown symbol offset '%zd' (stype = '%s')\n",
 				offset, symbol_type_text[stype]);
 		exit(1);
 	}
@@ -1107,9 +1089,7 @@ string get_symbol(symbol_type stype, size_t offset, size_t data_offset)
 int system_call(size_t offset, int& sp, size_t data_offset)
 {
 	auto func_name = get_symbol(pseudo_symbol, offset, 0);
-	if (verbose > 1) {
-		fprintf(stderr, "[DEBUG] system_call: %s (%zd)\n", func_name.c_str(), offset);
-	}
+	log<1>("[DEBUG] system_call: %s (%zd)\n", func_name.c_str(), offset);
 	if (func_name == "operator+(int,int)") {
 		int b = m[sp++];
 		int a = m[sp++];
@@ -1122,51 +1102,45 @@ int system_call(size_t offset, int& sp, size_t data_offset)
 			|| func_name == "operator<<(ostream,double)") {
 		int b = m[sp++];
 		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
-		if (verbose > 2) {
-			fprintf(stderr, "a = %s(%d), b = %d\n", aa.c_str(), a, b);
-		}
+		log<2>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
 		if (m[a] == 1) {
 			cout << b;
 		} else if (m[a] == 2) {
 			cerr << b;
 		} else {
-			fprintf(stderr, "Error: Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
+			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
 		return a;
 	} else if (func_name == "operator<<(ostream,string)") {
 		int b = m[sp++]; string bb = get_symbol(data_symbol, b, data_offset);
 		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
-		if (verbose > 3) {
-			fprintf(stderr, "a = %s(%d), b = %s(%d)\n", aa.c_str(), a, bb.c_str(), b);
-		}
+		log<3>("a = %s(%d), b = %s(%d)\n", aa.c_str(), a, bb.c_str(), b);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
 		if (m[a] == 1) {
 			cout << s;
 		} else if (m[a] == 2) {
 			cerr << s;
 		} else {
-			fprintf(stderr, "Error: Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
+			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
 		return a;
 	} else if (func_name == "operator<<(ostream,(*)(endl))") {
 		int b = m[sp++];
 		int a = m[sp++]; string aa = get_symbol(data_symbol, a, data_offset);
-		if (verbose > 1) {
-			fprintf(stderr, "a = %s(%d), b = %d\n", aa.c_str(), a, b);
-		}
+		log<1>("a = %s(%d), b = %d\n", aa.c_str(), a, b);
 		if (m[a] == 1) {
 			cout << endl;
 		} else if (m[a] == 2) {
 			cerr << endl;
 		} else {
-			fprintf(stderr, "Error: Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
+			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
 		return a;
 	} else {
-		fprintf(stderr, "Error: Unsupported function '%s'\n", func_name.c_str());
+		err("Unsupported function '%s'\n", func_name.c_str());
 		exit(1);
 	}
 }
@@ -1178,51 +1152,41 @@ int run(int argc, const char** argv)
 
 	auto it = override_functions.find("main");
 	if (it == override_functions.end() || it->second.empty()) {
-		cerr << "Error: main() not defined!" << endl;
+		err("main() not defined!\n");
 		return -1;
 	}
 	if (it->second.size() > 1) {
-		cerr << "Error: duplcated definition of main()!" << endl;
+		err("duplcated definition of main()!\n");
 		return -1;
 	}
 	auto it2 = symbols.find(*(it->second.begin()));
 	ip = get<1>(it2->second);
 
 	if (verbose) {
-		fprintf(stderr, "\nSystem Information:\n");
-		fprintf(stderr, "  sizeof(int) = %zd\n", sizeof(int));
-		fprintf(stderr, "  sizeof(void*) = %zd\n", sizeof(void*));
-		fprintf(stderr, "\n");
+		log("\nSystem Information:\n");
+		log("  sizeof(int) = %zd\n", sizeof(int));
+		log("  sizeof(void*) = %zd\n", sizeof(void*));
+		log("\n");
 	}
 
 	// load code & data
-	if (verbose > 0) {
-		fprintf(stderr, "Loading program\n  code: %zd byte(s)\n  data: %zd byte(s)\n",
-				code_segment.size(), data_section.size());
-	}
+	log<1>("Loading program\n  code: %zd byte(s)\n  data: %zd byte(s)\n",
+			code_segment.size(), data_section.size());
 	size_t offset = 0;
 	for (size_t i = 0; i < code_segment.size(); ++i) {
 		m[offset++] = code_segment[i];
 	}
 	size_t data_offset = offset;
-	if (verbose > 0) {
-		fprintf(stderr, "data_offset = %zd\n", data_offset);
-	}
+	log<2>("data_offset = %zd\n", data_offset);
 	for (size_t i = 0; i < data_section.size(); ++i) {
 		m[offset++] = data_section[i];
 	}
 	for (size_t i = 0; i < reloc_table.size(); ++i) {
-		if (verbose > 1) {
-			fprintf(stderr, "relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
-		}
+		log<2>("relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
 		m[reloc_table[i]] += data_offset;
-		if (verbose > 1) {
-			fprintf(stderr, " => 0x%08X\n", m[reloc_table[i]]);
-		}
+		log<2>(" => 0x%08X\n", m[reloc_table[i]]);
 	}
-	if (verbose > 0) {
-		fprintf(stderr, "\n");
-	}
+	log<2>("\n");
 
 	// prepare stack
 	m[--sp] = EXIT; // the last code (at the bottom of stack)
@@ -1235,7 +1199,7 @@ int run(int argc, const char** argv)
 	for (;;) {
 		++cycle;
 		if (verbose > 0) {
-			fprintf(stderr, "%zd:\t", cycle);
+			log("%zd:\t", cycle);
 			print_code(m, ip, false, data_offset);
 			if (verbose > 1) {
 				print_vm_env(ax, ip, sp, bp);
@@ -1250,8 +1214,8 @@ int run(int argc, const char** argv)
 
 		else if (i == MOVE  ) { ax = m[ip++];                               } // move immediate to ax
 		else if (i == LEA   ) { ax = m[ip++];                               } // load address to ax
-		else if (i == GET   ) { ax = m[m[ip++]];                            } // load value to ax
-		else if (i == PUT   ) { m[m[ip++]] = ax;                            } // dump ax to memory
+		else if (i == GET   ) { ax = m[m[ip++]];                            } // get memory to ax
+		else if (i == PUT   ) { m[m[ip++]] = ax;                            } // put ax to memory
 
 		else if (i == ADD ) { ax += m[ip++];                                } // add number to ax
 		else if (i == SUB ) { ax -= m[ip++];                                } // substract number from ax
@@ -1270,11 +1234,9 @@ int run(int argc, const char** argv)
 		else if (i == CALL  ) { m[--sp] = ip + 1; ip = m[ip];               } // call subroutine
 		else if (i == SYSTEM) { ax = system_call(m[ip++], sp, data_offset); } // system call
 
-		else { fprintf(stderr, "WARNING: unknown instruction: '%zd'\n", i); }
+		else { warn("unknown instruction: '%zd'\n", i); }
 	}
-	if (verbose > 0) {
-		fprintf(stderr, "Total: %zd cycle(s), return %d\n", cycle, ax);
-	}
+	log<1>("Total: %zd cycle(s), return %d\n", cycle, ax);
 	return m[sp];
 }
 
@@ -1290,7 +1252,7 @@ int main(int argc, const char** argv)
 		}
 	}
 	if (!filename) {
-		cout << "usage: icpp [-s] [-v] <foo.cpp> ..." << endl;
+		log("usage: icpp [-s] [-v] <foo.cpp> ...\n");
 		return false;
 	}
 	if (!load(filename) || !parse()) return -1;
