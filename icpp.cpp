@@ -2,6 +2,7 @@
 #include <cstdarg>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <unordered_set>
@@ -485,18 +486,16 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 		log("<invalid-code> (0x%08zX)", i);
 	}
 	if (machine_code_has_parameter(i)) {
+		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
 		size_t v = mem[ip++];
+		if (color && is_reloc) log(COLOR_GREEN);
 		log("\t0x%08zX (%zd)", v, v);
-		if (i == LEA || i == GET || i == PUT ||
-				i == ADDM || i == SUBM || i == MULM || i == DIVM || i == MODM ||
-				i == CALL || i == SYS) {
+		if (color && is_reloc) log(COLOR_BLUE);
+		if (is_reloc) {
 			symbol_type stype = data_symbol;
 			if (i == CALL) stype = code_symbol;
 			if (i == SYS) stype = pseudo_symbol;
-			if (i == LEA || i == PUT || i == GET ||
-					i == ADDM || i == SUBM || i == MULM || i == DIVM || i == MODM) {
-				v -= data_offset;
-			}
+			v -= data_offset;
 			auto it = offset_to_symbol[stype].find(v);
 			if (it != offset_to_symbol[stype].end()) {
 				log("\t; %s", it->second.c_str());
