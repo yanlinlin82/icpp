@@ -29,6 +29,7 @@ inline void warn(const char* fmt, va_list ap) { log(COLOR_YELLOW "Warning: "); l
 inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); warn(fmt, ap); }
 
 //--------------------------------------------------------//
+// machine code definition
 
 const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
@@ -57,11 +58,57 @@ inline bool machine_code_has_parameter(int code)
 	return (code >= MOVE);
 }
 
+//--------------------------------------------------------//
+// operator precedence in c/c++
+// ref: https://en.cppreference.com/w/cpp/language/operator_precedence
+
+unordered_map<string, int> operator_precedence = {
+	{ "::", 1 },
+
+	// suffix/postfix
+	//{ "++", 2 }, { "--", 2 }, { "{", 2 }, { "[", 2 }, { ".", 2 }, { "->", 2 },
+
+	// prefix
+	{ "++", 3 }, { "--", 3 }, { "+", 3 }, { "-", 3 },
+	{ "!", 3 }, { "~", 3 }, { "*", 3 }, { "&", 3 },
+
+	{ ".*", 4 }, { "->*", 4 },
+
+	{ "*", 5 }, { "/", 5 }, { "%", 5 },
+
+	{ "+", 6 }, { "-", 6 },
+
+	{ "<<", 7 }, { ">>", 7 },
+
+	{ "<=>", 8 },
+
+	{ "<", 9 }, { "<=", 9 }, { ">", 9 }, { ">=", 9 },
+
+	{ "==", 10 }, { "!=", 10 },
+
+	{ "&", 11 },
+
+	{ "^", 12 },
+
+	{ "|", 13 },
+
+	{ "&&", 14 },
+
+	{ "||", 15 },
+
+	{ "?", 16 }, { ":", 16 }, { "=", 16 },
+	{ "+=", 16 }, { "-=", 16 }, { "*=", 16 }, { "/=", 16 }, { "%=", 16 },
+	{ ">>=", 16 }, { "<<=", 16 }, { "&=", 16 }, { "^=", 16 }, { "|=", 16 },
+
+	{ ",", 17 },
+
+	{ "(", 99 }, { "#", 99 },
+};
+
+//--------------------------------------------------------//
 
 enum token_type { unknown = 0, symbol, number, text, op };
 const char* token_type_text[] = { "unknown", "symbol", "number", "text", "op" };
-
-unordered_map<string, int> o; // operation precedence
 
 bool source = false;
 vector<string> src;
@@ -114,7 +161,7 @@ void print_error(const char* fmt, ...)
 	exit(1);
 }
 
-void do_add_symbol(string name, symbol_type stype,
+void add_symbol(string name, symbol_type stype,
 		size_t offset, size_t size, string type, string ret_type)
 {
 	log<2>("[DEBUG] add symbol: ('%s', %s, %zd, %zd, '%s', '%s')\n",
@@ -131,7 +178,7 @@ void do_add_symbol(string name, symbol_type stype,
 size_t add_data_symbol(string name, vector<int> val, string type)
 {
 	size_t offset = data_section.size();
-	do_add_symbol(name, data_symbol, offset, val.size(), type, "");
+	add_symbol(name, data_symbol, offset, val.size(), type, "");
 	data_section.insert(data_section.end(), val.begin(), val.end());
 	return offset;
 }
@@ -139,7 +186,7 @@ size_t add_data_symbol(string name, vector<int> val, string type)
 void add_code_symbol(string name, string args_type, string ret_type)
 {
 	override_functions[name].insert(name + args_type);
-	do_add_symbol(name + args_type, code_symbol, code_segment.size(), 0, args_type, ret_type);
+	add_symbol(name + args_type, code_symbol, code_segment.size(), 0, args_type, ret_type);
 }
 
 void add_pseudo_symbol(string name, string args_type, string ret_type)
@@ -147,10 +194,10 @@ void add_pseudo_symbol(string name, string args_type, string ret_type)
 	static size_t counter = 0;
 	size_t offset = ++counter;
 	override_functions[name].insert(name + args_type);
-	do_add_symbol(name + args_type, pseudo_symbol, offset, 0, args_type, ret_type);
+	add_symbol(name + args_type, pseudo_symbol, offset, 0, args_type, ret_type);
 }
 
-vector<int> dump_string(const string& s)
+vector<int> prepare_string(const string& s)
 {
 	size_t bytes = s.size() + 1;
 	size_t size = (bytes + sizeof(int) + 1) / sizeof(int);
@@ -167,7 +214,7 @@ string alloc_name()
 
 size_t add_global_string(string s)
 {
-	auto mem = dump_string(s);
+	auto mem = prepare_string(s);
 	return add_data_symbol(alloc_name(), mem, "string");
 }
 
@@ -238,80 +285,11 @@ void skip_until(string expected_token, string stat)
 
 int precedence(string token)
 {
-	if (o.empty()) {
-		// ref: https://en.cppreference.com/w/cpp/language/operator_precedence
-		o.insert(make_pair("::", 1));
-#if 0
-		o.insert(make_pair("++", 2)); // suffix/postfix
-		o.insert(make_pair("--", 2));
-		o.insert(make_pair("{", 2));
-		o.insert(make_pair("[", 2));
-		o.insert(make_pair(".", 2));
-		o.insert(make_pair("->", 2));
-#endif
-		o.insert(make_pair("++", 3)); // prefix
-		o.insert(make_pair("--", 3));
-		o.insert(make_pair("+", 3));
-		o.insert(make_pair("-", 3));
-		o.insert(make_pair("!", 3));
-		o.insert(make_pair("~", 3));
-		o.insert(make_pair("*", 3));
-		o.insert(make_pair("&", 3));
-
-		o.insert(make_pair(".*", 4));
-		o.insert(make_pair("->*", 4));
-
-		o.insert(make_pair("*", 5));
-		o.insert(make_pair("/", 5));
-		o.insert(make_pair("%", 5));
-
-		o.insert(make_pair("+", 6));
-		o.insert(make_pair("-", 6));
-
-		o.insert(make_pair("<<", 7));
-		o.insert(make_pair(">>", 7));
-
-		o.insert(make_pair("<=>", 8));
-
-		o.insert(make_pair("<", 9));
-		o.insert(make_pair("<=", 9));
-		o.insert(make_pair(">", 9));
-		o.insert(make_pair(">=", 9));
-
-		o.insert(make_pair("==", 10));
-		o.insert(make_pair("!=", 10));
-
-		o.insert(make_pair("&", 11));
-
-		o.insert(make_pair("^", 12));
-
-		o.insert(make_pair("|", 13));
-
-		o.insert(make_pair("&&", 14));
-
-		o.insert(make_pair("||", 15));
-
-		o.insert(make_pair("?", 16));
-		o.insert(make_pair(":", 16));
-		o.insert(make_pair("=", 16));
-		o.insert(make_pair("+=", 16));
-		o.insert(make_pair("-=", 16));
-		o.insert(make_pair("*=", 16));
-		o.insert(make_pair("/=", 16));
-		o.insert(make_pair("%=", 16));
-		o.insert(make_pair(">>=", 16));
-		o.insert(make_pair("<<=", 16));
-		o.insert(make_pair("&=", 16));
-		o.insert(make_pair("^=", 16));
-		o.insert(make_pair("|=", 16));
-
-		o.insert(make_pair(",", 17));
-
-		o.insert(make_pair("(", 99));
-		o.insert(make_pair("#", 99));
+	if (operator_precedence.empty()) {
+		operator_precedence.insert(make_pair("::", 1));
 	}
-	auto it = o.find(token);
-	return (it == o.end() ? 0 : it->second);
+	auto it = operator_precedence.find(token);
+	return (it == operator_precedence.end() ? 0 : it->second);
 }
 
 string vector_to_string(const vector<string>& a)
@@ -385,7 +363,7 @@ pair<string, vector<int>> eval_item(const pair<token_type, string>& a)
 		return make_pair("int", a);
 	} else if (a.first == text) {
 		string s = eval_string(a.second);
-		vector<int> a = dump_string(s);
+		vector<int> a = prepare_string(s);
 		return make_pair("string", a);
 	} else {
 		print_error("eval_item failed!\n");
