@@ -105,6 +105,7 @@ unordered_map<string, int> operator_precedence = {
 };
 
 //--------------------------------------------------------//
+// global variables
 
 enum token_type { unknown = 0, symbol, number, text, op };
 const char* token_type_text[] = { "unknown", "symbol", "number", "text", "op" };
@@ -137,6 +138,11 @@ unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start
 
 size_t ext_symbol_counter = 0;
 
+size_t next_display_source_code = 0;
+size_t next_display_machine_code = 0;
+
+//--------------------------------------------------------//
+
 void print_source_code_line(size_t n)
 {
 	log("%4zd ", n + 1);
@@ -146,9 +152,11 @@ void print_source_code_line(size_t n)
 	log("\n");
 }
 
-void print_current()
+void print_current(bool with_source_code = true)
 {
-	print_source_code_line(line_no - 1);
+	if (with_source_code) {
+		print_source_code_line(line_no - 1);
+	}
 	log("     ");
 	for (const char* q = src[line_no - 1].c_str(); *q && q + token.size() != p; ++q) {
 		if (*q == '\t') log("    "); else log(" ");
@@ -254,6 +262,37 @@ string alloc_name()
 	return "@" + to_string(++counter);
 }
 
+size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
+{
+	size_t code_offset = ip;
+	if (color) { log(COLOR_YELLOW); }
+	log("%zd\t", ip);
+	if (color) { log(COLOR_BLUE); }
+	size_t i = mem[ip++];
+	if (i <= RET) {
+		log("%s", machine_code_name[i]);
+	} else {
+		log("<invalid-code> (0x%08zX)", i);
+	}
+	if (machine_code_has_parameter(i)) {
+		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
+		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
+		int v = mem[ip++];
+		if (color && is_reloc) log(COLOR_GREEN);
+		if (color && is_ext) log(COLOR_RED);
+		log("\t0x%08zX (%d)", v, v);
+		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
+
+		auto it = comments.find(code_offset);
+		if (it != comments.end()) {
+			log("\t; %s", it->second.c_str());
+		}
+	}
+	if (color) { log(COLOR_NORMAL); }
+	log("\n");
+	return ip;
+}
+
 size_t add_assembly_code(machine_code action, int param = 0,
 		bool relocate = false, bool extranal = false, string comment = "")
 {
@@ -274,6 +313,15 @@ size_t add_assembly_code(machine_code action, int param = 0,
 	if (!comment.empty()) {
 		comments.insert(make_pair(code_offset, comment));
 	}
+	if (verbose >= 3) {
+		if (next_display_machine_code < code_sec.size()) {
+			log(COLOR_BLUE);
+			while (next_display_machine_code < code_sec.size()) {
+				next_display_machine_code = print_code(code_sec, next_display_machine_code, true, 0, 0);
+			}
+			log(COLOR_NORMAL);
+		}
+	}
 	return code_offset;
 }
 
@@ -282,7 +330,7 @@ void next()
 	bool in_comment = false;
 retry:
 	if (!p || !*p) {
-		if (line_no >= src.size()) { token = ""; type = unknown; return; } // end of source code
+		if (line_no >= src.size()) { token = ""; type = unknown; goto end; } // end of source code
 		p = src[line_no++].c_str(); while (*p == ' ' || *p == '\t') ++p;   // next line and skip leading spaces
 		if (*p == '#') { while (*p) ++p; goto retry; }                     // skip '#'-leading line
 		if (!*p) goto retry;
@@ -300,8 +348,20 @@ retry:
 	} else { // operator
 		static const char* ops[] = { "==", "=", "!=", "!", "++", "+=", "+", "--", "-=", "->*", "->", "-", "<=>", "<=", "<<=", "<<", "<", ">=", ">>=", ">>", ">",
 			"||", "|=", "|", "&&", "&=", "&", "::", ":", "^", "*=", "*", "/=", "/", "%=", "%", "?", "~=", "~", ";", ".*", ".", "{", "}", "[", "]", "(", ")", ",", nullptr };
-		for (const char** q = ops; *q; ++q) { size_t l = strlen(*q); if (memcmp(p, *q, l) == 0) { type = op; token = *q; p += l; return; } }
+		for (const char** q = ops; *q; ++q) { size_t l = strlen(*q); if (memcmp(p, *q, l) == 0) { type = op; token = *q; p += l; goto end; } }
 		type = unknown; token = *p++;
+	}
+end:
+	if (verbose >= 3) {
+		if (next_display_source_code < line_no) {
+			log("[DEBUG] parsing source code (up to line %zd):\n" COLOR_GREEN, line_no);
+			while (next_display_source_code < line_no) {
+				print_source_code_line(next_display_source_code++);
+			}
+			log(COLOR_YELLOW);
+			print_current(false);
+			log(COLOR_NORMAL);
+		}
 	}
 }
 
@@ -343,7 +403,7 @@ string code_vector_to_string(const vector<pair<token_type, string>>& a)
 	string s; for (auto e : a) s += (s.empty() ? "" : "','") + e.second; return "['" + s + "']";
 }
 
-int eval_number(string s)
+int eval_number(string s) // TODO: support other number types
 {
 	int n = 0;
 	bool minus = false;
@@ -382,63 +442,6 @@ string eval_string(string s)
 		}
 	}
 	return r;
-}
-
-pair<string, vector<int>> eval_item(const pair<token_type, string>& a)
-{
-	if (a.first == number) {
-		int v = eval_number(a.second);
-		vector<int> a{v};
-		return make_pair("int", a);
-	} else if (a.first == text) {
-		string s = eval_string(a.second);
-		vector<int> a = prepare_string(s);
-		return make_pair("const char*", a);
-	} else {
-		print_error("eval_item failed!\n");
-		exit(1);
-	}
-}
-
-pair<string, vector<int>> eval_op(const pair<string, vector<int>>& a,
-		const pair<token_type, string>& op, const pair<string, vector<int>>& b)
-{
-	printf("eval_op: op = {%s:%s}\n", token_type_text[op.first], op.second.c_str());
-
-	if (op.second == "+") {
-		if (a.first == "int" and b.first == "int") {
-		}
-	}
-	print_error("failed");
-	exit(1);
-}
-
-pair<string, vector<int>> evaluate_postfix(const vector<pair<token_type, string>>& a, string type)
-{
-	vector<pair<string, vector<int>>> stack;
-	for (auto e : a) {
-		if (e.first == symbol) {
-			print_error("evaluate_postfix failed! there is some symbol!\n");
-		} else if (e.first != op) {
-			auto x = eval_item(e);
-			stack.push_back(x);
-		} else {
-			if (stack.size() < 2) { print_error("evaluate_postfix failed! stack overflow!\n"); }
-			auto b = stack.back(); stack.pop_back();
-			auto a = stack.back(); stack.pop_back();
-			stack.push_back(eval_op(a, e, b));
-		}
-	}
-	if (stack.size() != 1) { print_error("evaluate_postfix failed! content may be error!\n"); }
-	return stack.back();
-}
-
-bool can_be_evaluated(const vector<pair<token_type, string>>& a)
-{
-	for (size_t i = 0; i < a.size(); ++i) {
-		if (a[i].first == symbol) return false;
-	}
-	return true;
 }
 
 bool is_built_in_type()
@@ -492,83 +495,9 @@ string parse_type_name()
 	return type_name;
 }
 
-vector<pair<token_type, string>> parse_expression(bool before_comma = false)
+auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
 {
-	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
-	if (verbose >= 4) print_current();
-
-	vector<string> stack{"#"};
-	vector<pair<token_type, string>> postfix;
-	bool last_is_num = false;
-	bool last_is_symbol = false;
-	for (; !token.empty(); next()) {
-		log<4>("> token='%s', type=%s, stack=%s, postfix=%s\n",
-				token.c_str(), token_type_text[type],
-				vector_to_string(stack).c_str(), code_vector_to_string(postfix).c_str());
-		if (type != op) {
-			postfix.push_back(make_pair(type, token));
-			last_is_num = true;
-			last_is_symbol = (type == symbol);
-		} else if (token == ";") {
-			break;
-		} else if (token == "(") {
-			if (last_is_symbol) {
-				string name = postfix.back().second;
-				postfix.pop_back();
-				next();
-				size_t args_count = 0;
-				while (token != ")") {
-					++args_count;
-					parse_expression(true);
-					postfix.push_back(make_pair(unknown, "args-" + to_string(args_count)));
-					if (token == ")") break;
-					expect_token(",", "function " + name);
-					next();
-				}
-				log("function '%s' has %zd args\n", name.c_str(), args_count);
-				stack.push_back(name + "():" + to_string(args_count));
-				next();
-			} else {
-				stack.push_back(token);
-			}
-		} else if (token == ")") {
-			while (stack.back() != "(" && stack.back() != "#") {
-				postfix.push_back(make_pair(op, stack.back()));
-				stack.pop_back();
-			}
-			if (stack.back() == "#") {
-				break;
-			}
-			stack.pop_back(); // pop out "("
-		} else {
-			if (token == "," && before_comma) break;
-			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
-					token.c_str(), precedence(token),
-					stack.back().c_str(), precedence(stack.back()));
-			while (precedence(token) >= precedence(stack.back()) &&
-					stack.back() != "#") {
-				postfix.push_back(make_pair(op, stack.back()));
-				stack.pop_back();
-			}
-			if (!last_is_num) {
-				postfix.push_back(make_pair(unknown, ""));
-			}
-			stack.push_back(token);
-			last_is_num = false;
-			last_is_symbol = false;
-		}
-	}
-	while (stack.back() != "#") {
-		postfix.push_back(make_pair(op, stack.back()));
-		stack.pop_back();
-	}
-	log<3>("[DEBUG] expression parsed, postfix=%s\n", code_vector_to_string(postfix).c_str());
-	return postfix;
-}
-
-auto get_symbol_for_variable(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
-{
-	log<3>("[DEBUG] get_symbol_for_variable('%s')\n", s.c_str());
+	log<4>("[DEBUG] query symbol: '%s'\n", s.c_str());
 	if (verbose >= 4) print_stack_frame();
 
 	bool found = false;
@@ -612,98 +541,157 @@ auto get_symbol_for_variable(string s) -> tuple<bool, size_t, string, symbol_typ
 			type_name = t;
 		}
 	}
-	log<3>("[DEBUG] '%s': type='%s', offset=%zd, type='%s', style='%s'\n",
+	log<3>("[DEBUG] symbol '%s': type='%s', offset=%zd, type='%s', style='%s'\n",
 			s.c_str(), (is_global ? "global" : "local"), offset,
 			type_name.c_str(), symbol_type_text[stype]);
 	return make_tuple(is_global, offset, type_name, stype);
 }
 
-void build_code(const vector<pair<token_type, string>>& postfix)
+void build_code_for_op(string op_name, vector<string>& type_names)
 {
-	log<3>("[DEBUG] build_code: %s\n", code_vector_to_string(postfix).c_str());
-	vector<string> stack;
-	for (size_t i = 0; i < postfix.size(); ++i) {
-		if (postfix[i].first != op) {
-			if (i > 0) {
-				add_assembly_code(PUSH);
-			}
-			auto [ type, s ] = postfix[i];
-			if (type == number) {
-				int v = eval_number(s);
-				add_assembly_code(MOV, v);
-				stack.push_back("int");
-			} else if (type == text) {
-				string v = eval_string(s);
-				auto mem = prepare_string(v);
-				string name = alloc_name();
-				string type = "const char*";
-				size_t offset = add_const_string(name, mem, type);
-				add_assembly_code(MOV, offset, true, false, name + "\t" + type);
-				stack.push_back("const char*");
-			} else if (type == symbol) {
-				auto [ is_global, offset, type_name, stype ] = get_symbol_for_variable(s);
-				bool is_reloc = (stype == data_symbol);
-				bool is_ext = (stype == ext_symbol);
-				string name = s;
-				string type = type_name;
-				if (is_global) {
-					if (type_name == "int") {
-						add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type);
-					} else {
-						add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type);
-					}
-				} else {
-					if (type_name == "int") {
-						add_assembly_code(LGET, offset, false, false, name + "\t" + type);
-					} else {
-						add_assembly_code(LLEA, offset, false, false, name + "\t" + type);
-					}
-				}
-				stack.push_back(type_name);
-			} else {
-				print_error("Invalid token type!");
-			}
+	if (type_names.size() < 2) {
+		print_error("unexpected array size of type_names!\n");
+	}
+	string b_type = type_names.back(); type_names.pop_back();
+	string a_type = type_names.back(); type_names.pop_back();
+	if (a_type == "int" && b_type == "int") {
+		if (op_name == "+") {
+			add_assembly_code(ADD);
+		} else if (op_name == "-") {
+			add_assembly_code(SUB);
+		} else if (op_name == "*") {
+			add_assembly_code(MUL);
+		} else if (op_name == "/") {
+			add_assembly_code(DIV);
+		} else if (op_name == "%") {
+			add_assembly_code(MOD);
 		} else {
-			if (stack.size() < 2) {
-				err("Invalid postfix!\n");
-				exit(1);
-			}
-			string b_type_name = stack.back(); stack.pop_back();
-			string a_type_name = stack.back(); stack.pop_back();
-			string opr = postfix[i].second;
-			string ret_type;
-			if (a_type_name == "int" && b_type_name == "int") {
-				if (opr == "+") {
-					add_assembly_code(ADD);
-				} else if (opr == "-") {
-					add_assembly_code(SUB);
-				} else if (opr == "*") {
-					add_assembly_code(MUL);
-				} else if (opr == "/") {
-					add_assembly_code(DIV);
-				} else if (opr == "%") {
-					add_assembly_code(MOD);
+			print_error("Unsupported operator '%s'\n", op_name.c_str());
+		}
+		type_names.push_back("int");
+	} else {
+		string name = "operator" + op_name + "(" + a_type + "," + b_type + ")";
+		auto it = symbols.find(name);
+		if (it == symbols.end()) {
+			print_error("Unknown function '%s'\n", name.c_str());
+		}
+		auto [ stype, offset, size, type_name, ret_type ] = it->second;
+		if (stype != code_symbol && stype != ext_symbol) {
+			print_error("symbol '%s' is not a function!\n", name.c_str());
+		}
+		add_assembly_code(PUSH);
+		add_assembly_code(CALL, offset, false, (stype == ext_symbol), ret_type + " " + name);
+		type_names.push_back(ret_type);
+	}
+}
+
+string parse_expression(bool before_comma = false)
+{
+	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+
+	vector<string> stack{"#"};
+	vector<string> type_names;
+	token_type last_token_type = unknown;
+	string last_name = "";
+	for (; !token.empty(); last_token_type = type, next()) {
+		log<4>("> token='%s', type=%s, stack=%s, type_names=%s\n",
+				token.c_str(), token_type_text[type],
+				vector_to_string(stack).c_str(), vector_to_string(type_names).c_str());
+		if (type == number) {
+			if (!type_names.empty()) add_assembly_code(PUSH);
+			int v = eval_number(token);
+			add_assembly_code(MOV, v);
+			type_names.push_back("int");
+		} else if (type == text) {
+			if (!type_names.empty()) add_assembly_code(PUSH);
+			string v = eval_string(token);
+			auto mem = prepare_string(v);
+			string name = alloc_name();
+			string type_name = "const char*";
+			size_t offset = add_const_string(name, mem, type_name);
+			add_assembly_code(MOV, offset, true, false, name + "\t" + type_name);
+			type_names.push_back("const char*");
+		} else if (type == symbol) {
+			if (!type_names.empty()) add_assembly_code(PUSH);
+			auto [ is_global, offset, type_name, stype ] = query_symbol(token);
+			bool is_reloc = (stype == data_symbol);
+			bool is_ext = (stype == ext_symbol);
+			string name = token;
+			if (is_global) {
+				if (type_name == "int") {
+					add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type_name);
 				} else {
-					print_error("Unsupported operator '%s'\n", opr.c_str());
+					add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type_name);
 				}
-				ret_type = "int";
 			} else {
-				string name = "operator" + opr + "(" + a_type_name + "," + b_type_name + ")";
+				if (type_name == "int") {
+					add_assembly_code(LGET, offset, false, false, name + "\t" + type_name);
+				} else {
+					add_assembly_code(LLEA, offset, false, false, name + "\t" + type_name);
+				}
+			}
+			type_names.push_back(type_name);
+			last_name = name;
+		} else if (token == ";") {
+			break;
+		} else if (token == "(") {
+			if (last_token_type == symbol) {
+				string name = last_name;
+				next();
+				vector<string> arg_types;
+				if (token != ")") {
+					for (;;) {
+						string type = parse_expression(true);
+						arg_types.push_back(type);
+						add_assembly_code(PUSH, 0, false, false, "");
+						if (token == ")") break;
+						expect_token(",", "function '" + name + "'");
+						next();
+					}
+				}
+				expect_token(")", "function '" + name + "'");
+				next();
+				log("function '%s' has %zd args\n", name.c_str(), arg_types.size());
 				auto it = symbols.find(name);
 				if (it == symbols.end()) {
-					print_error("Unknown function '%s'\n", name.c_str());
+					print_error("function '%s' not defined!", name.c_str());
 				}
-				auto [ stype, offset, size, type_name, the_ret_type ] = it->second;
-				if (stype != code_symbol && stype != ext_symbol) {
-					print_error("symbol '%s' is not a function!\n", name.c_str());
-				}
-				add_assembly_code(PUSH);
-				add_assembly_code(CALL, offset, false, (stype == ext_symbol), the_ret_type + " " + name);
-				ret_type = the_ret_type;
+				auto [ stype, offset, size, type_name, ret_type ] = it->second;
+				add_assembly_code(CALL, offset, false, (stype == ext_symbol));
+				type_names.push_back(ret_type);
+			} else {
+				stack.push_back(token);
 			}
-			stack.push_back(ret_type);
+		} else if (token == ")") {
+			while (stack.back() != "(" && stack.back() != "#") {
+				build_code_for_op(stack.back(), type_names);
+				stack.pop_back();
+			}
+			if (stack.back() == "#") {
+				break;
+			}
+			stack.pop_back(); // pop out "("
+		} else {
+			if (token == "," && before_comma) break;
+			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
+					token.c_str(), precedence(token),
+					stack.back().c_str(), precedence(stack.back()));
+			while (precedence(token) >= precedence(stack.back()) &&
+					stack.back() != "#") {
+				build_code_for_op(stack.back(), type_names);
+				stack.pop_back();
+			}
+			stack.push_back(token);
 		}
 	}
+	while (stack.back() != "#") {
+		build_code_for_op(stack.back(), type_names);
+		stack.pop_back();
+	}
+	if (type_names.size() != 1) {
+		print_error("Unexpected type_names size: %zd!\n", type_names.size());
+	}
+	return type_names.back();
 }
 
 void parse_init_statement()
@@ -716,7 +704,6 @@ void parse_init_statement()
 	if (verbose >= 3) {
 		log("[DEBUG] => function/variable '%s', type='%s'\n",
 				name.c_str(), type_name.c_str());
-		if (verbose >= 4) print_current();
 	}
 	if (token == "(") { // function
 		if (!scopes.empty() && scopes.back().first != "function") {
@@ -734,15 +721,15 @@ void parse_init_statement()
 			}
 		}
 		expect_token(")", "function " + name);
-		next();
-		scopes.push_back(make_pair("function", name));
-		expect_token("{", "function " + name);
 		string args_type = "(";
 		for (size_t i = 0; i < args.size(); ++i) {
 			args_type += (i == 0 ? "" : ",") + args[i].first;
 		}
 		args_type += ")";
 		add_code_symbol(name, args_type, type_name);
+		next();
+		scopes.push_back(make_pair("function", name));
+		expect_token("{", "function " + name);
 		size_t offset = add_assembly_code(ENTER);
 		stack_frame_table.push_back(make_pair(offset + 1, unordered_map<string, tuple<int, int, string>>()));
 		for (size_t i = 0; i < args.size(); ++i) {
@@ -754,23 +741,12 @@ void parse_init_statement()
 			vector<int> init(1);
 			if (token == "=") {
 				next();
-				auto postfix = parse_expression(true);
-				if (can_be_evaluated(postfix)) {
-					auto val = evaluate_postfix(postfix, type_name);
-					init = val.second;
-					auto [ is_global, offset ] = add_variable(name, init, type_name);
-					if (!is_global) {
-						add_assembly_code(MOV, init[0], false, false, "");
-						add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
-					}
+				parse_expression(true);
+				auto [ is_global, offset ] = add_variable(name, init, type_name);
+				if (is_global) {
+					add_assembly_code(PUT, offset, true, false, name + "\t" + type_name);
 				} else {
-					auto [ is_global, offset ] = add_variable(name, init, type_name);
-					build_code(postfix);
-					if (is_global) {
-						add_assembly_code(PUT, offset, true, false, name + "\t" + type_name);
-					} else {
-						add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
-					}
+					add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
 				}
 			}
 			if (token != ",") break;
@@ -784,7 +760,6 @@ void parse_init_statement()
 			if (verbose >= 3) {
 				log("[DEBUG] => another variable '%s', type='%s'\n",
 						name.c_str(), type_name.c_str());
-				if (verbose >= 4) print_current();
 			}
 		}
 		expect_token(";", "variable");
@@ -792,41 +767,9 @@ void parse_init_statement()
 	}
 }
 
-size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
-{
-	size_t code_offset = ip;
-	if (color) { log(COLOR_YELLOW); }
-	log("%zd\t", ip);
-	if (color) { log(COLOR_BLUE); }
-	size_t i = mem[ip++];
-	if (i <= RET) {
-		log("%s", machine_code_name[i]);
-	} else {
-		log("<invalid-code> (0x%08zX)", i);
-	}
-	if (machine_code_has_parameter(i)) {
-		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
-		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
-		int v = mem[ip++];
-		if (color && is_reloc) log(COLOR_GREEN);
-		if (color && is_ext) log(COLOR_RED);
-		log("\t0x%08zX (%d)", v, v);
-		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
-
-		auto it = comments.find(code_offset);
-		if (it != comments.end()) {
-			log("\t; %s", it->second.c_str());
-		}
-	}
-	if (color) { log(COLOR_NORMAL); }
-	log("\n");
-	return ip;
-}
-
 void parse_statements()
 {
 	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
-	if (verbose >= 4) print_current();
 	if (token == "{") {
 		log<3>("[DEBUG] => statement '{'\n");
 		next(); while (!token.empty() && token != "}") parse_statements();
@@ -871,8 +814,7 @@ void parse_statements()
 		}
 		string name = scopes.back().second;
 		if (token != ";") {
-			auto postfix = parse_expression();
-			build_code(postfix);
+			parse_expression();
 		}
 		expect_token(";", "return");
 		add_assembly_code(LEAVE);
@@ -887,8 +829,7 @@ void parse_statements()
 			token == "extern" || is_built_in_type()) { // start as type
 		parse_init_statement();
 	} else {
-		auto postfix = parse_expression();
-		build_code(postfix);
+		parse_expression();
 		expect_token(";", "statement");
 		next();
 	}
@@ -984,24 +925,20 @@ string get_scopes_text()
 	string s; for (auto e : scopes) s += (s.empty() ? "" : "::") + e.second; return s;
 }
 
-bool parse()
+void parse()
 {
 	init_symbol();
 
 	for (next(); !token.empty();) {
-		log<3>("[DEBUG] parsing: line_no=%zd, token='%s', type='%s', scopes='%s'\n",
-				line_no, token.c_str(), token_type_text[type], get_scopes_text().c_str());
-		if (verbose >= 4) print_current();
-
 		if (token == "using") {
 			next(); while (!token.empty() && token != ";") next();
 			if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
+			log<2>("[INFO] => 'using' statement skipped\n");
 			next();
-			log<3>("[DEBUG] => 'using' statement skipped\n");
 		} else if (token == "typedef") {
 			skip_until(";", token);
+			log<2>("[INFO] => 'typedef' statement skipped\n");
 			next();
-			log<3>("[DEBUG] => 'typedef' statement skipped\n");
 		} else if (token == "enum") {
 			parse_enum();
 		} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
@@ -1011,15 +948,15 @@ bool parse()
 			next();
 			expect_token("{", keyword + " " + name);
 			scopes.push_back(make_pair(keyword, name));
+			log<2>("[INFO] => (%s %s) start\n", keyword.c_str(), name.c_str());
 			next();
-			log<3>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
 		} else if (token == "template") {
 			skip_until(";", token);
+			log<2>("[INFO] => 'template' statement skipped\n");
 			next();
-			log<3>("[DEBUG] => 'template' statement skipped\n");
 		} else if (token == ";") {
+			log<2>("[INFO] => ';' - end of statement\n");
 			next();
-			log<3>("[DEBUG] => ';' - end of statement\n");
 		} else if (token == "}") {
 			string scope_type;
 			string scope_name;
@@ -1034,7 +971,7 @@ bool parse()
 					add_assembly_code(RET);
 				}
 			}
-			log<3>("[DEBUG] => '}' - end of block (%s,%s)\n",
+			log<2>("[INFO] => '}' - end of block (%s,%s)\n",
 					scope_type.c_str(), scope_name.c_str());
 			stack_frame_table.pop_back();
 			next();
@@ -1042,7 +979,6 @@ bool parse()
 			parse_statements();
 		}
 	}
-	return true;
 }
 
 int show()
@@ -1293,11 +1229,11 @@ int run(int argc, const char** argv)
 		else if (i == LGET) { ax = m[bp + m[ip++]]; } // get local to ax
 		else if (i == LPUT) { m[bp + m[ip++]] = ax; } // put ax to local
 
-		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + a
-		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - a
-		else if (i == MUL ) { ax = m[sp++] * ax;    } // stack (top) * a
-		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / a
-		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % a
+		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + a, and pop out
+		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - a, and pop out
+		else if (i == MUL ) { ax = m[sp++] * ax;    } // stack (top) * a, and pop out
+		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / a, and pop out
+		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % a, and pop out
 
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++]; } // enter stack frame
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                } // leave stack frame
@@ -1334,6 +1270,6 @@ int main(int argc, const char** argv)
 		log("usage: icpp [-s] [-v] <foo.cpp> ...\n");
 		return false;
 	}
-	if (!load(filename) || !parse()) return -1;
+	if (load(filename)) parse();
 	return assembly ? show() : run(argc, argv);
 }
