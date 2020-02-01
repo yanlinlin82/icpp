@@ -121,6 +121,7 @@ vector<int> data_sec;
 
 vector<int> reloc_table;
 vector<int> ext_table;
+unordered_map<size_t, string> comments;
 
 enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
 const char* symbol_type_text[] = { "data", "code", "ext" };
@@ -212,7 +213,8 @@ string alloc_name()
 	return "@" + to_string(++counter);
 }
 
-void add_assembly_code(machine_code action, int param, bool relocate, bool extranal)
+void add_assembly_code(machine_code action, int param = 0,
+		bool relocate = false, bool extranal = false, string comment = "")
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
@@ -220,12 +222,16 @@ void add_assembly_code(machine_code action, int param, bool relocate, bool extra
 	} else {
 		it->second.second = code_sec.size();
 	}
+	size_t code_offset = code_sec.size();
 	code_sec.push_back(action);
 	if (machine_code_has_parameter(action)) {
-		size_t offset = code_sec.size();
-		if (relocate) reloc_table.push_back(offset);
-		if (extranal) ext_table.push_back(offset);
+		size_t addr_offset = code_sec.size();
+		if (relocate) reloc_table.push_back(addr_offset);
+		if (extranal) ext_table.push_back(addr_offset);
 		code_sec.push_back(param);
+	}
+	if (!comment.empty()) {
+		comments.insert(make_pair(code_offset, comment));
 	}
 }
 
@@ -476,6 +482,7 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 
 size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
 {
+	size_t code_offset = ip;
 	if (color) { log(COLOR_YELLOW); }
 	log("%zd\t", ip);
 	if (color) { log(COLOR_BLUE); }
@@ -485,7 +492,7 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 	} else {
 		log("<invalid-code> (0x%08zX)", i);
 	}
-	if (machine_code_has_parameter(i) && i != ENTER && i != LEAVE) {
+	if (machine_code_has_parameter(i)) {
 		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
 		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
 		size_t v = mem[ip++];
@@ -494,31 +501,12 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 		log("\t0x%08zX (%zd)", v, v);
 		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
 
-		symbol_type stype = data_symbol;
-		if (is_reloc) {
-			stype = data_symbol;
-			v -= data_offset;
-		} else if (is_ext) {
-			stype = ext_symbol;
-			v -= ext_offset;
-		}
-		auto it = offset_to_symbol[stype].find(v);
-		if (it != offset_to_symbol[stype].end()) {
-			auto it2 = symbols.find(it->second);
-			if (it2 != symbols.end()) {
-				auto [ stype, offset, size, type_name, ret_type ] = it2->second;
-				if (stype == data_symbol) {
-					log("\t; %s\t%s", it->second.c_str(), type_name.c_str());
-				} else {
-					if (ret_type.empty()) {
-						log("\t; %s\t%s", it->second.c_str(), type_name.c_str());
-					} else {
-						log("\t; %s %s", ret_type.c_str(), it->second.c_str());
-					}
-				}
-			}
+		auto it = comments.find(code_offset);
+		if (it != comments.end()) {
+			log("\t; %s", it->second.c_str());
 		}
 	}
+	if (color) { log(COLOR_NORMAL); }
 	log("\n");
 	return ip;
 }
@@ -559,27 +547,31 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 	for (size_t i = 0; i < postfix.size(); ++i) {
 		if (postfix[i].first != op) {
 			if (i > 0) {
-				add_assembly_code(PUSH, 0, false, false);
+				add_assembly_code(PUSH);
 			}
 			auto [ type, s ] = postfix[i];
 			if (type == number) {
 				int v = eval_number(s);
-				add_assembly_code(MOV, v, false, false);
+				add_assembly_code(MOV, v);
 				stack.push_back("int");
 			} else if (type == text) {
 				string v = eval_string(s);
 				auto mem = prepare_string(v);
-				size_t offset = add_data_symbol(alloc_name(), mem, "const char*");
-				add_assembly_code(MOV, offset, true, false);
+				string name = alloc_name();
+				string type = "const char*";
+				size_t offset = add_data_symbol(name, mem, type);
+				add_assembly_code(MOV, offset, true, false, name + "\t" + type);
 				stack.push_back("const char*");
 			} else if (type == symbol) {
 				auto [ offset, type_name, stype ] = get_symbol_for_variable(s);
 				bool is_reloc = (stype == data_symbol);
 				bool is_ext = (stype == ext_symbol);
+				string name = s;
+				string type = type_name;
 				if (type_name == "int") {
-					add_assembly_code(GET, offset, is_reloc, is_ext);
+					add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type);
 				} else {
-					add_assembly_code(LEA, offset, is_reloc, is_ext);
+					add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type);
 				}
 				stack.push_back(type_name);
 			} else {
@@ -596,15 +588,15 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 			string ret_type;
 			if (a_type_name == "int" && b_type_name == "int") {
 				if (opr == "+") {
-					add_assembly_code(ADD, 0, false, false);
+					add_assembly_code(ADD);
 				} else if (opr == "-") {
-					add_assembly_code(SUB, 0, false, false);
+					add_assembly_code(SUB);
 				} else if (opr == "*") {
-					add_assembly_code(MUL, 0, false, false);
+					add_assembly_code(MUL);
 				} else if (opr == "/") {
-					add_assembly_code(DIV, 0, false, false);
+					add_assembly_code(DIV);
 				} else if (opr == "%") {
-					add_assembly_code(MOD, 0, false, false);
+					add_assembly_code(MOD);
 				} else {
 					print_error("Unsupported operator '%s'\n", opr.c_str());
 				}
@@ -619,8 +611,8 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 				if (stype != code_symbol && stype != ext_symbol) {
 					print_error("symbol '%s' is not a function!\n", name.c_str());
 				}
-				add_assembly_code(PUSH, 0, false, false);
-				add_assembly_code(CALL, offset, false, (stype == ext_symbol));
+				add_assembly_code(PUSH);
+				add_assembly_code(CALL, offset, false, (stype == ext_symbol), the_ret_type + " " + name);
 				ret_type = the_ret_type;
 			}
 			stack.push_back(ret_type);
@@ -670,8 +662,8 @@ void parse_statements()
 			build_code(postfix);
 		}
 		expect_token(";", "return");
-		add_assembly_code(LEAVE, 0, false, false);
-		add_assembly_code(RET, 0, false, false);
+		add_assembly_code(LEAVE);
+		add_assembly_code(RET);
 		next();
 		if (stack.empty()) {
 			print_error("unexpected 'return' statement!\n");
@@ -844,8 +836,8 @@ void parse_source()
 		}
 		if (keyword == "function") {
 			if (returned_functions.find(name) == returned_functions.end()) {
-				add_assembly_code(LEAVE, 0, false, false);
-				add_assembly_code(RET, 0, false, false);
+				add_assembly_code(LEAVE);
+				add_assembly_code(RET);
 			}
 		}
 		log<2>("[DEBUG] => '}' - end of block (%s,%s)\n", keyword.c_str(), name.c_str());
@@ -871,7 +863,7 @@ void parse_source()
 			expect_token("{", "function " + name);
 			string args_type = "(...)";
 			add_code_symbol(name, args_type, type_name);
-			add_assembly_code(ENTER, 0, false, false);
+			add_assembly_code(ENTER);
 			next();
 		} else { // variable
 			for (;;) {
@@ -886,7 +878,7 @@ void parse_source()
 					} else {
 						size_t offset = add_data_symbol(name, init, type_name);
 						build_code(postfix);
-						add_assembly_code(PUT, offset, true, false);
+						add_assembly_code(PUT, offset, true, false, name);
 					}
 				}
 				if (token != ",") break;
@@ -997,19 +989,19 @@ int show()
 		}
 	}
 
-	log<2>("relocate table:\n");
+	log<1>("relocate table (%zd items):\n", reloc_table.size());
 	for (size_t i = 0; i < reloc_table.size(); ++i) {
-		log<2>("\t0x%08x", reloc_table[i]);
-		if (i % 5 == 4) log<2>("\n");
+		log<1>("\t0x%08x", reloc_table[i]);
+		if (i % 5 == 4) log<1>("\n");
 	}
-	if (reloc_table.size() % 5 != 0) log<2>("\n");
+	if (reloc_table.size() % 5 != 0) log<1>("\n");
 
-	log<2>("external table:\n");
+	log<1>("external table (%zd items):\n", ext_table.size());
 	for (size_t i = 0; i < ext_table.size(); ++i) {
-		log<2>("\t0x%08x", ext_table[i]);
-		if (i % 5 == 4) log<2>("\n");
+		log<1>("\t0x%08x", ext_table[i]);
+		if (i % 5 == 4) log<1>("\n");
 	}
-	if (ext_table.size() % 5 != 0) log<2>("\n");
+	if (ext_table.size() % 5 != 0) log<1>("\n");
 	return 0;
 }
 
