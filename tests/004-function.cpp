@@ -1,15 +1,12 @@
 #include <cstdio>
 
-int fibonacci(int n)
+int add(int a, int b)
 {
-	if (n <= 2) return n;
-	return fibonacci(n - 2) + fibonacci(n - 1);
+	return a + b;
 }
 
 int main()
 {
-	for (size_t i = 1; i < 10; ++i) {
-		cout << "fibonacci(" << i << ") = " << fibonacci(i) << endl;
-	}
-	return 0;
+	int a = 1, b = 2;
+	return add(a, b);
 }
