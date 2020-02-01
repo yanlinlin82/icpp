@@ -128,7 +128,7 @@ vector<int> ext_table;
 unordered_map<size_t, string> comments;
 
 enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
-const char* symbol_type_text[] = { "data", "code", "ext" };
+const char* symbol_type_text[] = { "data", "code", "external" };
 unordered_map<string, tuple<symbol_type, size_t, size_t, string, string>> symbols; // name => { symbol_type, offset, size, type, ret_type }
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
@@ -169,8 +169,8 @@ void print_error(const char* fmt, ...)
 void add_symbol(string name, symbol_type stype,
 		size_t offset, size_t size, string type, string ret_type)
 {
-	log<2>("[DEBUG] add symbol: ('%s', %s, %zd, %zd, '%s', '%s')\n",
-			name.c_str(), symbol_type_text[stype],
+	log<3>("[DEBUG] add %s symbol: '%s', offset=%zd, size=%zd, type='%s', ret_type='%s'\n",
+			symbol_type_text[stype], name.c_str(),
 			offset, size, type.c_str(), ret_type.c_str());
 	symbols[name] = make_tuple(stype, offset, size, type, ret_type);
 	if (offset_to_symbol[stype].find(offset) != offset_to_symbol[stype].end()) {
@@ -190,6 +190,7 @@ size_t add_const_string(string name, vector<int> val, string type)
 
 auto add_variable(string name, vector<int> val, string type) -> pair<bool, size_t> // { is-global, offset }
 {
+	log<3>("[DEBUG] add variable '%s', type = '%s'\n", name.c_str(), type.c_str());
 	if (stack_frame_table.empty()) {
 		size_t offset = data_sec.size();
 		add_symbol(name, data_symbol, offset, val.size(), type, "");
@@ -197,11 +198,31 @@ auto add_variable(string name, vector<int> val, string type) -> pair<bool, size_
 		return make_pair(true, offset);
 	} else {
 		size_t stack_frame_offset = stack_frame_table.back().first;
-		size_t symbol_offset = code_sec[stack_frame_offset];
+		size_t symbol_offset = code_sec[stack_frame_offset] + 1;
 		code_sec[stack_frame_offset] += val.size();
-		stack_frame_table.back().second.insert(make_pair(name, make_tuple(symbol_offset, val.size(), type)));
-		return make_pair(false, symbol_offset);
+		stack_frame_table.back().second.insert(make_pair(name, make_tuple(-symbol_offset, val.size(), type)));
+		return make_pair(false, -symbol_offset);
 	}
+}
+
+void print_stack_frame()
+{
+	log("[DEBUG] current stack frame has %zd variable\n", stack_frame_table.back().second.size());
+	size_t i = 0;
+	for (auto it = stack_frame_table.back().second.begin();
+			it != stack_frame_table.back().second.end();
+			++it) {
+		auto [ offset, size, type ] = it->second;
+		log("[DEBUG] [%zd] '%s': offset=%d, size=%d, type='%s'\n", i++, it->first.c_str(), offset, size, type.c_str());
+	}
+}
+
+void add_argument(string name, string type, size_t offset)
+{
+	log<3>("[DEBUG] add argument '%s', type = '%s'\n", name.c_str(), type.c_str());
+	auto& stack_frame = stack_frame_table.back().second;
+	stack_frame.insert(make_pair(name, make_tuple(-offset, 1, type)));
+	if (verbose >= 4) print_stack_frame();
 }
 
 void add_code_symbol(string name, string args_type, string ret_type)
@@ -314,24 +335,12 @@ int precedence(string token)
 
 string vector_to_string(const vector<string>& a)
 {
-	string s = "[";
-	for (size_t i = 0; i < a.size(); ++i) {
-		if (i > 0) s += ",";
-		s += "'" + a[i] + "'";
-	}
-	s += "]";
-	return s;
+	string s; for (auto e : a) s += (s.empty() ? "" : ",") + e; return "[" + s + "]";
 }
 
 string code_vector_to_string(const vector<pair<token_type, string>>& a)
 {
-	string s = "[";
-	for (size_t i = 0; i < a.size(); ++i) {
-		if (i > 0) s += ",";
-		s += "'" + a[i].second + "|" + token_type_text[a[i].first] + "'";
-	}
-	s += "]";
-	return s;
+	string s; for (auto e : a) s += (s.empty() ? "" : "','") + e.second; return "['" + s + "']";
 }
 
 int eval_number(string s)
@@ -432,17 +441,68 @@ bool can_be_evaluated(const vector<pair<token_type, string>>& a)
 	return true;
 }
 
+bool is_built_in_type()
+{
+	return (token == "char" || token == "short" || token == "int" ||
+			token == "long" || token == "longlong" ||
+			token == "float" || token == "double" ||
+			token == "signed" || token == "unsigned");
+}
+
+string parse_type_name()
+{
+	string prefix;
+	if (token == "static" || token == "extern") {
+		prefix = token;
+		next(); // skip this prefix
+	}
+	string type_name;
+	if (token == "auto") {
+		type_name = token; next();
+	} else {
+		vector<pair<token_type, string>> a;
+		int angle_bracket = 0;
+		while (token == "const" || is_built_in_type() ||
+				token == "*" || token == "&" ||
+				token == "<" || token == ">" || token == ">>") {
+			if (token == "<") {
+				++angle_bracket;
+				a.push_back(make_pair(type, token));
+				next();
+			} else if (token == ">") {
+				if (--angle_bracket < 0) { print_error("unexpected '>'!\n"); }
+				a.push_back(make_pair(type, token));
+				next();
+			} else if (token == ">>") {
+				if (angle_bracket < 2) { print_error("unexpected '>>'!\n"); }
+				angle_bracket -= 2;
+				a.push_back(make_pair(type, ">"));
+				a.push_back(make_pair(type, ">"));
+				next();
+			} else {
+				a.push_back(make_pair(type, token));
+				next();
+			}
+		}
+		for (auto e : a) {
+			type_name += (type_name.empty() ? "" : " ");
+			type_name += e.second;
+		}
+	}
+	return type_name;
+}
+
 vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 {
-	log<2>("%s:\n", __FUNCTION__);
-	if (verbose >= 3) print_current();
+	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+	if (verbose >= 4) print_current();
 
 	vector<string> stack{"#"};
 	vector<pair<token_type, string>> postfix;
 	bool last_is_num = false;
 	bool last_is_symbol = false;
 	for (; !token.empty(); next()) {
-		log<2>("> token='%s', type=%s, stack=%s, postfix=%s\n",
+		log<4>("> token='%s', type=%s, stack=%s, postfix=%s\n",
 				token.c_str(), token_type_text[type],
 				vector_to_string(stack).c_str(), code_vector_to_string(postfix).c_str());
 		if (type != op) {
@@ -453,15 +513,20 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 			break;
 		} else if (token == "(") {
 			if (last_is_symbol) {
-				string func_name = postfix.back().second;
-				stack.push_back("()");
-				for (;;) {
-					next();
-					parse_expression();
+				string name = postfix.back().second;
+				postfix.pop_back();
+				next();
+				size_t args_count = 0;
+				while (token != ")") {
+					++args_count;
+					parse_expression(true);
+					postfix.push_back(make_pair(unknown, "args-" + to_string(args_count)));
 					if (token == ")") break;
-					expect_token(",", "function " + func_name);
+					expect_token(",", "function " + name);
 					next();
 				}
+				log("function '%s' has %zd args\n", name.c_str(), args_count);
+				stack.push_back(name + "():" + to_string(args_count));
 				next();
 			} else {
 				stack.push_back(token);
@@ -477,7 +542,7 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 			stack.pop_back(); // pop out "("
 		} else {
 			if (token == "," && before_comma) break;
-			log<2>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
+			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
 					token.c_str(), precedence(token),
 					stack.back().c_str(), precedence(stack.back()));
 			while (precedence(token) >= precedence(stack.back()) &&
@@ -497,43 +562,15 @@ vector<pair<token_type, string>> parse_expression(bool before_comma = false)
 		postfix.push_back(make_pair(op, stack.back()));
 		stack.pop_back();
 	}
-	log<2>("expression parsed, postfix=%s\n", code_vector_to_string(postfix).c_str());
+	log<3>("[DEBUG] expression parsed, postfix=%s\n", code_vector_to_string(postfix).c_str());
 	return postfix;
-}
-
-size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
-{
-	size_t code_offset = ip;
-	if (color) { log(COLOR_YELLOW); }
-	log("%zd\t", ip);
-	if (color) { log(COLOR_BLUE); }
-	size_t i = mem[ip++];
-	if (i <= RET) {
-		log("%s", machine_code_name[i]);
-	} else {
-		log("<invalid-code> (0x%08zX)", i);
-	}
-	if (machine_code_has_parameter(i)) {
-		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
-		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
-		size_t v = mem[ip++];
-		if (color && is_reloc) log(COLOR_GREEN);
-		if (color && is_ext) log(COLOR_RED);
-		log("\t0x%08zX (%zd)", v, v);
-		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
-
-		auto it = comments.find(code_offset);
-		if (it != comments.end()) {
-			log("\t; %s", it->second.c_str());
-		}
-	}
-	if (color) { log(COLOR_NORMAL); }
-	log("\n");
-	return ip;
 }
 
 auto get_symbol_for_variable(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
 {
+	log<3>("[DEBUG] get_symbol_for_variable('%s')\n", s.c_str());
+	if (verbose >= 4) print_stack_frame();
+
 	bool found = false;
 	bool is_global = false;
 	size_t offset = 0;
@@ -575,7 +612,7 @@ auto get_symbol_for_variable(string s) -> tuple<bool, size_t, string, symbol_typ
 			type_name = t;
 		}
 	}
-	log<2>("[DEBUG] get_symbol_for_variable('%s') => ['%s', %zd, '%s', '%s']\n",
+	log<3>("[DEBUG] '%s': type='%s', offset=%zd, type='%s', style='%s'\n",
 			s.c_str(), (is_global ? "global" : "local"), offset,
 			type_name.c_str(), symbol_type_text[stype]);
 	return make_tuple(is_global, offset, type_name, stype);
@@ -583,13 +620,7 @@ auto get_symbol_for_variable(string s) -> tuple<bool, size_t, string, symbol_typ
 
 void build_code(const vector<pair<token_type, string>>& postfix)
 {
-	if (verbose >= 2) {
-		log("[DEBUG] => build_code - expression [%zd]\n", postfix.size());
-		for (size_t i = 0; i < postfix.size(); ++i) {
-			log("[DEBUG]   (%zd) '%s' (type = %s)\n", i + 1,
-					postfix[i].second.c_str(), token_type_text[postfix[i].first]);
-		}
-	}
+	log<3>("[DEBUG] build_code: %s\n", code_vector_to_string(postfix).c_str());
 	vector<string> stack;
 	for (size_t i = 0; i < postfix.size(); ++i) {
 		if (postfix[i].first != op) {
@@ -675,15 +706,134 @@ void build_code(const vector<pair<token_type, string>>& postfix)
 	}
 }
 
+void parse_init_statement()
+{
+	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+
+	string type_name = parse_type_name();
+	string type_prefix = type_name;
+	string name = token; next();
+	if (verbose >= 3) {
+		log("[DEBUG] => function/variable '%s', type='%s'\n",
+				name.c_str(), type_name.c_str());
+		if (verbose >= 4) print_current();
+	}
+	if (token == "(") { // function
+		if (!scopes.empty() && scopes.back().first != "function") {
+			print_error("nesting function is not allowed!\n");
+		}
+		next();
+		vector<pair<string, string>> args; // [ { type, name } ]
+		if (token != ")") {
+			for (;;) {
+				string arg_type_name = parse_type_name();
+				string arg_name = token; next();
+				args.push_back(make_pair(arg_type_name, arg_name));
+				if (token != ",") break;
+				next();
+			}
+		}
+		expect_token(")", "function " + name);
+		next();
+		scopes.push_back(make_pair("function", name));
+		expect_token("{", "function " + name);
+		string args_type = "(";
+		for (size_t i = 0; i < args.size(); ++i) {
+			args_type += (i == 0 ? "" : ",") + args[i].first;
+		}
+		args_type += ")";
+		add_code_symbol(name, args_type, type_name);
+		size_t offset = add_assembly_code(ENTER);
+		stack_frame_table.push_back(make_pair(offset + 1, unordered_map<string, tuple<int, int, string>>()));
+		for (size_t i = 0; i < args.size(); ++i) {
+			add_argument(args[i].second, args[i].first, i);
+		}
+		next();
+	} else { // variable
+		for (;;) {
+			vector<int> init(1);
+			if (token == "=") {
+				next();
+				auto postfix = parse_expression(true);
+				if (can_be_evaluated(postfix)) {
+					auto val = evaluate_postfix(postfix, type_name);
+					init = val.second;
+					auto [ is_global, offset ] = add_variable(name, init, type_name);
+					if (!is_global) {
+						add_assembly_code(MOV, init[0], false, false, "");
+						add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
+					}
+				} else {
+					auto [ is_global, offset ] = add_variable(name, init, type_name);
+					build_code(postfix);
+					if (is_global) {
+						add_assembly_code(PUT, offset, true, false, name + "\t" + type_name);
+					} else {
+						add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
+					}
+				}
+			}
+			if (token != ",") break;
+			next();
+			type_name = type_prefix;
+			while (token == "*" || token == "&") {
+				type_name += token;
+				next();
+			}
+			name = token; next();
+			if (verbose >= 3) {
+				log("[DEBUG] => another variable '%s', type='%s'\n",
+						name.c_str(), type_name.c_str());
+				if (verbose >= 4) print_current();
+			}
+		}
+		expect_token(";", "variable");
+		next();
+	}
+}
+
+size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
+{
+	size_t code_offset = ip;
+	if (color) { log(COLOR_YELLOW); }
+	log("%zd\t", ip);
+	if (color) { log(COLOR_BLUE); }
+	size_t i = mem[ip++];
+	if (i <= RET) {
+		log("%s", machine_code_name[i]);
+	} else {
+		log("<invalid-code> (0x%08zX)", i);
+	}
+	if (machine_code_has_parameter(i)) {
+		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
+		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
+		int v = mem[ip++];
+		if (color && is_reloc) log(COLOR_GREEN);
+		if (color && is_ext) log(COLOR_RED);
+		log("\t0x%08zX (%d)", v, v);
+		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
+
+		auto it = comments.find(code_offset);
+		if (it != comments.end()) {
+			log("\t; %s", it->second.c_str());
+		}
+	}
+	if (color) { log(COLOR_NORMAL); }
+	log("\n");
+	return ip;
+}
+
 void parse_statements()
 {
-	log<2>("[DEBUG] %s\n", __FUNCTION__);
-	if (verbose >= 3) print_current();
+	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+	if (verbose >= 4) print_current();
 	if (token == "{") {
+		log<3>("[DEBUG] => statement '{'\n");
 		next(); while (!token.empty() && token != "}") parse_statements();
 		expect_token("}", "{");
 		next();
 	} if (token == "if") {
+		log<3>("[DEBUG] => statement 'if'\n");
 		next(); expect_token("(", "if");
 		next(); parse_expression(); expect_token(")", "if");
 		next(); parse_statements();
@@ -692,17 +842,20 @@ void parse_statements()
 			parse_statements();
 		}
 	} else if (token == "for") {
+		log<3>("[DEBUG] => statement 'for'\n");
 		next(); expect_token("(", "for");
-		next(); parse_expression(); expect_token(";", "for");
+		next(); parse_init_statement(); expect_token(";", "for");
 		next(); parse_expression(); expect_token(";", "for");
 		next(); parse_expression(); expect_token(")", "for");
 		expect_token(")", "for");
 		next(); parse_statements();
 	} else if (token == "while") {
+		log<3>("[DEBUG] => statement 'while'\n");
 		next(); expect_token("(", "while");
 		next(); parse_expression(); expect_token(")", "while");
 		next(); parse_statements();
 	} else if (token == "do") {
+		log<3>("[DEBUG] => statement 'do'\n");
 		next(); expect_token("{", "do");
 		parse_statements();
 		expect_token("while", "do");
@@ -711,6 +864,7 @@ void parse_statements()
 		next(); expect_token(")", "do");
 		next(); expect_token(";", "do");
 	} else if (token == "return") {
+		log<3>("[DEBUG] => statement 'return'\n");
 		next();
 		if (scopes.empty() || scopes.back().first != "function") {
 			print_error("unexpected 'return' statement!\n");
@@ -726,8 +880,12 @@ void parse_statements()
 		next();
 		returned_functions.insert(name);
 	} else if (token == "typedef") {
+		log<3>("[DEBUG] => statement 'typedef'\n");
 		skip_until(";", "typedef");
 		next();
+	} else if (token == "auto" || token == "const" || token == "static" ||
+			token == "extern" || is_built_in_type()) { // start as type
+		parse_init_statement();
 	} else {
 		auto postfix = parse_expression();
 		build_code(postfix);
@@ -784,184 +942,6 @@ void parse_enum()
 	log<1>("[DEBUG] end of enum %s\n", name.c_str());
 }
 
-bool is_built_in_type()
-{
-	return (token == "char" || token == "short" || token == "int" ||
-			token == "long" || token == "longlong" ||
-			token == "float" || token == "double" ||
-			token == "signed" || token == "unsigned");
-}
-
-string parse_type_name()
-{
-	string prefix;
-	if (token == "static" || token == "extern") {
-		prefix = token;
-		next(); // skip this prefix
-	}
-	string type_name;
-	if (token == "auto") {
-		type_name = token; next();
-	} else {
-		vector<pair<token_type, string>> a;
-		int angle_bracket = 0;
-		while (token == "const" || is_built_in_type() ||
-				token == "*" || token == "&" ||
-				token == "<" || token == ">" || token == ">>") {
-			if (token == "<") {
-				++angle_bracket;
-				a.push_back(make_pair(type, token));
-				next();
-			} else if (token == ">") {
-				if (--angle_bracket < 0) { print_error("unexpected '>'!\n"); }
-				a.push_back(make_pair(type, token));
-				next();
-			} else if (token == ">>") {
-				if (angle_bracket < 2) { print_error("unexpected '>>'!\n"); }
-				angle_bracket -= 2;
-				a.push_back(make_pair(type, ">"));
-				a.push_back(make_pair(type, ">"));
-				next();
-			} else {
-				a.push_back(make_pair(type, token));
-				next();
-			}
-		}
-		for (auto e : a) {
-			type_name += (type_name.empty() ? "" : " ");
-			type_name += e.second;
-		}
-	}
-	return type_name;
-}
-
-void parse_source()
-{
-	if (verbose >= 2) {
-		log("[DEBUG] parse_source(), line_no = %zd, token=\"%s\", type=%s, scopes='",
-				line_no, token.c_str(), token_type_text[type]);
-		for (size_t i = 0; i < scopes.size(); ++i) {
-			log("%s%s(%s)", (i > 0 ? "::" : ""), scopes[i].second.c_str(), scopes[i].first.c_str());
-		}
-		log("'\n");
-		if (verbose >= 3) print_current();
-	}
-
-	if (token == "using") {
-		next(); while (!token.empty() && token != ";") next();
-		if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
-		next();
-		log<2>("[DEBUG] => 'using' statement skipped\n");
-	} else if (token == "typedef") {
-		skip_until(";", token);
-		next();
-		log<2>("[DEBUG] => 'typedef' statement skipped\n");
-	} else if (token == "enum") {
-		parse_enum();
-	} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
-		string keyword = token;
-		next();
-		string name = token;
-		next();
-		expect_token("{", keyword + " " + name);
-		scopes.push_back(make_pair(keyword, name));
-		next();
-		log<2>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
-	} else if (token == "template") {
-		skip_until(";", token);
-		next();
-		log<2>("[DEBUG] => 'template' statement skipped\n");
-	} else if (token == ";") {
-		next();
-		log<2>("[DEBUG] => ';' - end of statement\n");
-	} else if (token == "}") {
-		string scope_type;
-		string scope_name;
-		if (!scopes.empty()) {
-			scope_type = scopes.back().first;
-			scope_name = scopes.back().second;
-			scopes.pop_back();
-		}
-		if (scope_type == "function") {
-			if (returned_functions.find(scope_name) == returned_functions.end()) {
-				add_assembly_code(LEAVE);
-				add_assembly_code(RET);
-			}
-		}
-		log<2>("[DEBUG] => '}' - end of block (%s,%s)\n",
-				scope_type.c_str(), scope_name.c_str());
-		stack_frame_table.pop_back();
-		next();
-	} else if (token == "auto" || token == "const" ||
-			token == "static" || token == "extern" ||
-			is_built_in_type()) { // start as type
-		string type_name = parse_type_name();
-		string type_prefix = type_name;
-		string name = token; next();
-		if (verbose >= 2) {
-			log("[DEBUG] => function/variable '%s', type='%s'\n",
-					name.c_str(), type_name.c_str());
-			if (verbose >= 3) print_current();
-		}
-		if (token == "(") { // function
-			if (!scopes.empty() && scopes.back().first != "function") {
-				print_error("nesting function is not allowed!\n");
-			}
-			skip_until(")", "function " + name); // TODO: parse arg types
-			next();
-			scopes.push_back(make_pair("function", name));
-			expect_token("{", "function " + name);
-			string args_type = "(...)";
-			add_code_symbol(name, args_type, type_name);
-			size_t offset = add_assembly_code(ENTER);
-			stack_frame_table.push_back(make_pair(offset + 1, unordered_map<string, tuple<int, int, string>>()));
-			next();
-		} else { // variable
-			for (;;) {
-				vector<int> init(1);
-				if (token == "=") {
-					next();
-					auto postfix = parse_expression(true);
-					if (can_be_evaluated(postfix)) {
-						auto val = evaluate_postfix(postfix, type_name);
-						init = val.second;
-						auto [ is_global, offset ] = add_variable(name, init, type_name);
-						if (!is_global) {
-							add_assembly_code(MOV, init[0], false, false, "");
-							add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
-						}
-					} else {
-						auto [ is_global, offset ] = add_variable(name, init, type_name);
-						build_code(postfix);
-						if (is_global) {
-							add_assembly_code(PUT, offset, true, false, name + "\t" + type_name);
-						} else {
-							add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
-						}
-					}
-				}
-				if (token != ",") break;
-				next();
-				type_name = type_prefix;
-				while (token == "*" || token == "&") {
-					type_name += token;
-					next();
-				}
-				name = token; next();
-				if (verbose >= 2) {
-					log("[DEBUG] => another variable '%s', type='%s'\n",
-							name.c_str(), type_name.c_str());
-					if (verbose >= 3) print_current();
-				}
-			}
-			expect_token(";", "variable");
-			next();
-		}
-	} else {
-		parse_statements();
-	}
-}
-
 bool load(string filename)
 {
 	ifstream file(filename);
@@ -979,13 +959,29 @@ bool load(string filename)
 
 void init_symbol()
 {
+	log<2>("[INFO] prepare external symbols\n");
 	add_external_symbol("cout", "ostream");
 	add_external_symbol("cerr", "ostream");
-	add_external_symbol("endl", "(endl)", "void");
+	add_external_symbol("endl", "(endl_t)", "void");
 	add_external_symbol("operator<<", "(ostream,int)",         "ostream");
 	add_external_symbol("operator<<", "(ostream,double)",      "ostream");
 	add_external_symbol("operator<<", "(ostream,const char*)", "ostream");
-	add_external_symbol("operator<<", "(ostream,(*)(endl))",   "ostream");
+	add_external_symbol("operator<<", "(ostream,(*)(endl_t))",   "ostream");
+	log<1>("[INFO] total %zd symbols are prepared\n", symbols.size());
+	if (verbose >= 2) {
+		size_t i = 0;
+		for (auto it = symbols.begin(); it != symbols.end(); ++it) {
+			auto name = it->first;
+			auto [ stype, offset, size, type_name, ret_type ] = it->second;
+			log("[INFO] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s'\n",
+					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str());
+		}
+	}
+}
+
+string get_scopes_text()
+{
+	string s; for (auto e : scopes) s += (s.empty() ? "" : "::") + e.second; return s;
 }
 
 bool parse()
@@ -993,7 +989,58 @@ bool parse()
 	init_symbol();
 
 	for (next(); !token.empty();) {
-		parse_source();
+		log<3>("[DEBUG] parsing: line_no=%zd, token='%s', type='%s', scopes='%s'\n",
+				line_no, token.c_str(), token_type_text[type], get_scopes_text().c_str());
+		if (verbose >= 4) print_current();
+
+		if (token == "using") {
+			next(); while (!token.empty() && token != ";") next();
+			if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
+			next();
+			log<3>("[DEBUG] => 'using' statement skipped\n");
+		} else if (token == "typedef") {
+			skip_until(";", token);
+			next();
+			log<3>("[DEBUG] => 'typedef' statement skipped\n");
+		} else if (token == "enum") {
+			parse_enum();
+		} else if (token == "union" || token == "struct" || token == "class" || token == "namespace") {
+			string keyword = token;
+			next();
+			string name = token;
+			next();
+			expect_token("{", keyword + " " + name);
+			scopes.push_back(make_pair(keyword, name));
+			next();
+			log<3>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
+		} else if (token == "template") {
+			skip_until(";", token);
+			next();
+			log<3>("[DEBUG] => 'template' statement skipped\n");
+		} else if (token == ";") {
+			next();
+			log<3>("[DEBUG] => ';' - end of statement\n");
+		} else if (token == "}") {
+			string scope_type;
+			string scope_name;
+			if (!scopes.empty()) {
+				scope_type = scopes.back().first;
+				scope_name = scopes.back().second;
+				scopes.pop_back();
+			}
+			if (scope_type == "function") {
+				if (returned_functions.find(scope_name) == returned_functions.end()) {
+					add_assembly_code(LEAVE);
+					add_assembly_code(RET);
+				}
+			}
+			log<3>("[DEBUG] => '}' - end of block (%s,%s)\n",
+					scope_type.c_str(), scope_name.c_str());
+			stack_frame_table.pop_back();
+			next();
+		} else {
+			parse_statements();
+		}
 	}
 	return true;
 }
@@ -1115,11 +1162,11 @@ string get_symbol(symbol_type stype, size_t offset,
 
 auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset) -> pair<int, int> // [ ax, RET <n> ]
 {
-	log<2>("[DEBUG] external call: %s\n", name.c_str());
+	log<3>("[DEBUG] external call: %s\n", name.c_str());
 	if (name == "operator<<(ostream,int)") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("DEBUG] args: %d, %d\n", a, b);
+		log<2>("[DEBUG] args: %d, %d\n", a, b);
 		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		if (aa == "cout") {
 			cout << b;
@@ -1133,7 +1180,7 @@ auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset)
 	} else if (name == "operator<<(ostream,const char*)") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("DEBUG] args: %d, %d\n", a, b);
+		log<2>("[DEBUG] args: %d, %d\n", a, b);
 		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
 		if (aa == "cout") {
@@ -1145,10 +1192,10 @@ auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset)
 			exit(1);
 		}
 		return make_pair(a, 2);
-	} else if (name == "operator<<(ostream,(*)(endl))") {
+	} else if (name == "operator<<(ostream,(*)(endl_t))") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("DEBUG] args: %d, %d\n", a, b);
+		log<2>("[DEBUG] args: %d, %d\n", a, b);
 		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
 		if (aa == "cout") {
 			cout << endl;
@@ -1243,8 +1290,8 @@ int run(int argc, const char** argv)
 		else if (i == GET ) { ax = m[m[ip++]];      } // get memory to ax
 		else if (i == PUT ) { m[m[ip++]] = ax;      } // put ax to memory
 		else if (i == LLEA) { ax = bp - m[ip++];    } // load local address to ax
-		else if (i == LGET) { ax = m[bp - m[ip++]]; } // get local to ax
-		else if (i == LPUT) { m[bp - m[ip++]] = ax; } // put ax to local
+		else if (i == LGET) { ax = m[bp + m[ip++]]; } // get local to ax
+		else if (i == LPUT) { m[bp + m[ip++]] = ax; } // put ax to local
 
 		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + a
 		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - a
