@@ -262,12 +262,10 @@ string alloc_name()
 	return "@" + to_string(++counter);
 }
 
-size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset, int ext_offset)
+size_t print_code(const vector<int>& mem, size_t ip, int data_offset, int ext_offset)
 {
 	size_t code_offset = ip;
-	if (color) { log(COLOR_YELLOW); }
-	log("%zd\t", ip);
-	if (color) { log(COLOR_BLUE); }
+	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
 	if (i <= RET) {
 		log("%s", machine_code_name[i]);
@@ -278,18 +276,16 @@ size_t print_code(const vector<int>& mem, size_t ip, bool color, int data_offset
 		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
 		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
 		int v = mem[ip++];
-		if (color && is_reloc) log(COLOR_GREEN);
-		if (color && is_ext) log(COLOR_RED);
+		if (is_reloc || is_ext) log(is_reloc ? COLOR_GREEN : COLOR_RED);
 		log("\t0x%08zX (%d)", v, v);
-		if (color && (is_reloc || is_ext)) log(COLOR_BLUE);
+		if (is_reloc || is_ext) log(COLOR_BLUE);
 
 		auto it = comments.find(code_offset);
 		if (it != comments.end()) {
 			log("\t; %s", it->second.c_str());
 		}
 	}
-	if (color) { log(COLOR_NORMAL); }
-	log("\n");
+	log(COLOR_NORMAL "\n");
 	return ip;
 }
 
@@ -317,7 +313,7 @@ size_t add_assembly_code(machine_code action, int param = 0,
 		if (next_display_machine_code < code_sec.size()) {
 			log(COLOR_BLUE);
 			while (next_display_machine_code < code_sec.size()) {
-				next_display_machine_code = print_code(code_sec, next_display_machine_code, true, 0, 0);
+				next_display_machine_code = print_code(code_sec, next_display_machine_code, 0, 0);
 			}
 			log(COLOR_NORMAL);
 		}
@@ -989,7 +985,7 @@ int show()
 		if (it != offset.end()) {
 			log(COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
-				j = print_code(code_sec, j, true, 0, 0);
+				j = print_code(code_sec, j, 0, 0);
 			}
 			log(COLOR_NORMAL);
 		}
@@ -1209,7 +1205,7 @@ int run(int argc, const char** argv)
 		++cycle;
 		if (verbose >= 1) {
 			log("%zd:\t", cycle);
-			print_code(m, ip, false, data_offset, ext_offset);
+			print_code(m, ip, data_offset, ext_offset);
 			if (verbose >= 2) {
 				print_vm_env(ax, ip, sp, bp);
 			}
