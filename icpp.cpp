@@ -306,6 +306,9 @@ size_t add_assembly_code(machine_code action, int param = 0,
 		size_t addr_offset = code_sec.size();
 		if (relocate) reloc_table.push_back(addr_offset);
 		if (extranal) ext_table.push_back(addr_offset);
+		if (action == CALL) {
+			param -= code_sec.size() + 1; // use relative address
+		}
 		code_sec.push_back(param);
 	}
 	if (!comment.empty()) {
@@ -660,7 +663,10 @@ string parse_expression(bool before_comma = false)
 				next();
 				log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
 				auto [ offset, ret_type, stype ] = query_function(name, arg_types);
-				add_assembly_code(CALL, offset, false, (stype == ext_symbol));
+				string type_name;
+				for (auto e : arg_types) type_name += (type_name.empty() ? "" : ",") + e;
+				add_assembly_code(CALL, offset, false, (stype == ext_symbol),
+						ret_type + " " + name + "(" + type_name + ")");
 				type_names.push_back(ret_type);
 				log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
 			} else if (token == "++" || token == "--") {
@@ -1198,9 +1204,8 @@ int run(int argc, const char** argv)
 	// vm register
 	int ax = 0, ip = 0, sp = MEM_SIZE, bp = MEM_SIZE;
 
-	int loading_position = 0;
-
 	// load code & data
+	const int loading_position = 0;
 	log<1>("Loading program\n  code: %zd word(s)\n  data: %zd word(s)\n\n",
 			code_sec.size(), data_sec.size());
 
@@ -1238,7 +1243,7 @@ int run(int argc, const char** argv)
 		return -1;
 	}
 	auto it2 = symbols.find(*(it->second.begin()));
-	ip = get<1>(it2->second);
+	ip = loading_position + get<1>(it2->second);
 
 	// prepare stack
 	m[--sp] = EXIT; // the last code (at the bottom of stack)
@@ -1285,7 +1290,7 @@ int run(int argc, const char** argv)
 
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++]; } // enter stack frame
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                } // leave stack frame
-		else if (i == CALL ) { m[--sp] = ip + 1; ip = m[ip];         } // call subroutine
+		else if (i == CALL ) { m[--sp] = ip + 1; ip += m[ip++];      } // call subroutine
 		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n; } // exit subroutine
 
 		else { warn("unknown instruction: '%zd'\n", i); }
