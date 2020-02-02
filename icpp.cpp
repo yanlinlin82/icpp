@@ -106,7 +106,7 @@ unordered_map<string, int> operator_precedence = {
 
 	{ ",", 17 },
 
-	{ "(", 99 }, { ";", 99 }
+	{ "(", 99 }, { ")", 99 }, { ";", 99 }
 };
 
 //--------------------------------------------------------//
@@ -578,13 +578,8 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 	return make_tuple(is_global, offset, type_name, stype);
 }
 
-void build_code_for_op(string op_name, vector<string>& type_names)
+string build_code_for_op(string a_type, string op_name, string b_type)
 {
-	if (type_names.size() < 2) {
-		print_error("unexpected array size of type_names!\n");
-	}
-	string b_type = type_names.back(); type_names.pop_back();
-	string a_type = type_names.back(); type_names.pop_back();
 	if (a_type == "int" && b_type == "int") {
 		if      (op_name == "+" ) add_assembly_code(ADD);
 		else if (op_name == "-" ) add_assembly_code(SUB);
@@ -604,7 +599,7 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 		else if (op_name == "&&") add_assembly_code(LAND);
 		else if (op_name == "||") add_assembly_code(LOR);
 		else print_error("Unsupported operator '%s'\n", op_name.c_str());
-		type_names.push_back("int");
+		return "int";
 	} else {
 		string name = "operator" + op_name + "(" + a_type + "," + b_type + ")";
 		auto it = symbols.find(name);
@@ -617,7 +612,7 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 		}
 		add_assembly_code(PUSH);
 		add_assembly_code(CALL, offset, ret_type + " " + name);
-		type_names.push_back(ret_type);
+		return ret_type;
 	}
 }
 
@@ -652,145 +647,110 @@ string parse_expression(string stop_token = ";")
 	log<3>("[DEBUG] > %s (stop at '%s', token = '%s'):\n",
 			__FUNCTION__, stop_token.c_str(), token.c_str());
 
-	vector<string> stack{stop_token};
-	vector<string> type_names;
-	bool last_is_operand = false;
-	while (!token.empty() && token != stop_token) {
-		log<4>("> token='%s', type=%s, stack=%s, type_names=%s\n",
-				token.c_str(), token_type_text[type],
-				vector_to_string(stack).c_str(), vector_to_string(type_names).c_str());
-		if (type == number) {
-			if (!type_names.empty()) add_assembly_code(PUSH);
-			int v = eval_number(token);
-			add_assembly_code(MOV, v);
-			type_names.push_back("int");
+	if (type == number) {
+		int v = eval_number(token);
+		add_assembly_code(MOV, v);
+		next();
+		return "int";
+	} else if (type == text) {
+		string v = eval_string(token);
+		auto mem = prepare_string(v);
+		string name = alloc_name();
+		string type_name = "const char*";
+		size_t offset = add_const_string(name, mem, type_name);
+		add_assembly_code(MOV, offset, name + "\t" + type_name);
+		next();
+		return "const char*";
+	} else if (token == "sizeof") {
+		next(); expect_token("(", "sizeof");
+		next(); parse_expression();
+		next(); expect_token(")", "sizeof");
+		int size = sizeof(int);
+		add_assembly_code(MOV, size);
+		next(); // TODO: support sizeof()
+		return "int";
+	} else if (token == "(") {
+		next();
+		string type_name = parse_expression();
+		expect_token(")", "'(' in parse_expression");
+		next();
+		return type_name;
+	}
+
+	string type_name;
+	if (type != symbol) { // prefix
+		string op_name = token;
+		next();
+		type_name = parse_expression(op_name);
+	} else {
+		string name = token;
+		next();
+		while (token == "::") {
+			name += token; next();
+			if (type != symbol) { print_error("unexpected token after '::'!\n"); }
+			name += token; next();
+		}
+		if (token == "(") {
+			type_name = parse_function(name);
 			next();
-			last_is_operand = true;
-		} else if (type == text) {
-			if (!type_names.empty()) add_assembly_code(PUSH);
-			string v = eval_string(token);
-			auto mem = prepare_string(v);
-			string name = alloc_name();
-			string type_name = "const char*";
-			size_t offset = add_const_string(name, mem, type_name);
-			add_assembly_code(MOV, offset, name + "\t" + type_name);
-			type_names.push_back("const char*");
-			next();
-			last_is_operand = true;
-		} else if (token == "sizeof") { // TODO: support sizeof()
-			next(); expect_token("(", "sizeof");
-			next(); parse_expression();
-			next(); expect_token(")", "sizeof");
-			next();
-			last_is_operand = true;
-		} else if (token == "(") {
-			stack.push_back(token);
-			next();
-			last_is_operand = false;
-		} else if (token == ")") {
-			while (stack.back() != "(" && stack.back() != stop_token) {
-				build_code_for_op(stack.back(), type_names);
-				stack.pop_back();
-			}
-			if (stack.back() == stop_token) {
-				break;
-			}
-			stack.pop_back(); // pop out "("
-			next();
-			last_is_operand = true;
-		} else if (type == symbol) {
-			if (!type_names.empty()) add_assembly_code(PUSH);
-			string name = token;
-			next();
-			while (token == "::") {
-				name += token; next();
-				if (type != symbol) { print_error("unexpected token after '::'!\n"); }
-				name += token; next();
-			}
-			if (token == "(") {
-				string ret_type = parse_function(name);
-				type_names.push_back(ret_type);
-				next();
-			} else if (token == "=") {
-				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
-				if (is_global) {
-					add_assembly_code(LEA, offset, name + "\t" + type_name);
-				} else {
-					add_assembly_code(LLEA, offset, name + "\t" + type_name);
-				}
-				add_assembly_code(PUSH);
-				next();
-				parse_expression(",");
-				add_assembly_code(SPUT, offset, name + "\t" + type_name);
-				type_names.push_back(type_name);
-			} else if (token == "++" || token == "--") { // suffix/postfix
-				// TODO: operator++ | operator--
-				next();
-			} else if (token == "{") {
-				// TODO: initializer
-				skip_until("}", "");
-			} else if (token == "[") {
-				// TODO: array
-				skip_until("]", "");
-			} else if (token == "." || token == "->") {
-				// TODO: find member
-				next();
-			} else if (token == ".*" || token == "->*") {
-				// TODO: find member
-				next();
+		} else if (token == "=") {
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (is_global) {
+				add_assembly_code(LEA, offset, name + "\t" + type_name);
 			} else {
-				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
-				if (is_global) {
-					if (type_name == "int") {
-						add_assembly_code(GET, offset, name + "\t" + type_name);
-					} else {
-						add_assembly_code(LEA, offset, name + "\t" + type_name);
-					}
-				} else {
-					if (type_name == "int") {
-						add_assembly_code(LGET, offset, name + "\t" + type_name);
-					} else {
-						add_assembly_code(LLEA, offset, name + "\t" + type_name);
-					}
-				}
-				if (stype == code_symbol) {
-					type_names.push_back("(*)(" + type_name + ")");
-				} else {
-					type_names.push_back(type_name);
-				}
+				add_assembly_code(LLEA, offset, name + "\t" + type_name);
 			}
-			last_is_operand = true;
-		} else if (!last_is_operand &&
-				(token == "++" || token == "--" ||
-				 token == "+" || token == "-" ||
-				 token == "~" || token == "!" ||
-				 token == "*" || token == "&")) { // prefix
-			string op_name = token;
+			add_assembly_code(PUSH);
 			next();
-			parse_expression(token);
-			last_is_operand = false;
+			parse_expression(",");
+			add_assembly_code(SPUT, offset, name + "\t" + type_name);
+			type_name = symbol_type_name;
+		} else if (token == "++" || token == "--") { // suffix/postfix
+			// TODO: operator++ | operator--
+			next();
+		} else if (token == "{") {
+			// TODO: initializer
+			skip_until("}", "");
+		} else if (token == "[") {
+			// TODO: array
+			skip_until("]", "");
+		} else if (token == "." || token == "->") {
+			// TODO: find member
+			next();
+		} else if (token == ".*" || token == "->*") {
+			// TODO: find member
+			next();
 		} else {
-			if (precedence(token) >= precedence(stop_token)) break;
-			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
-					token.c_str(), precedence(token),
-					stack.back().c_str(), precedence(stack.back()));
-			while (precedence(token) >= precedence(stack.back()) &&
-					stack.back() != stop_token) {
-				build_code_for_op(stack.back(), type_names);
-				stack.pop_back();
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (is_global) {
+				if (symbol_type_name == "int") {
+					add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
+				} else {
+					add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
+				}
+			} else {
+				if (symbol_type_name == "int") {
+					add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+				} else {
+					add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
+				}
 			}
-			stack.push_back(token);
-			next();
+			if (stype == code_symbol) {
+				type_name = "(*)(" + symbol_type_name + ")";
+			} else {
+				type_name = symbol_type_name;
+			}
 		}
 	}
-	while (stack.back() != stop_token) {
-		build_code_for_op(stack.back(), type_names);
-		stack.pop_back();
+
+	while (precedence(token) < precedence(stop_token)) {
+		string op_name = token;
+		next();
+		add_assembly_code(PUSH);
+		string b_type = parse_expression(op_name);
+		type_name = build_code_for_op(type_name, op_name, b_type);
 	}
-	if (type_names.size() != 1) {
-		print_error("Unexpected type_names size: %zd!\n", type_names.size());
-	}
-	return type_names.back();
+	return type_name;
 }
 
 void parse_init_statement()
