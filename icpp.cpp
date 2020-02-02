@@ -412,22 +412,27 @@ string code_vector_to_string(const vector<pair<token_type, string>>& a)
 	string s; for (auto e : a) s += (s.empty() ? "" : "','") + e.second; return "['" + s + "']";
 }
 
-int eval_number(string s) // TODO: support other number types
+int eval_number(string s) // TODO: support long long and float/double
 {
 	int n = 0;
 	bool minus = false;
 	const char* p = s.c_str();
-	if (*p == '-') {
-		minus = true;
-		++p;
-	}
-	while (*p) {
-		if (*p >= '0' && *p <= '9') {
-			n = n * 10 + (*p - '0');
-			++p;
-		} else if (*p == '.') {
-			break;
+	if (*p == '-') { ++p; minus = true; }
+	int base = 10;
+	if (*p == '0') {
+		++p; base = 8;
+		if (*p == 'x') {
+			++p; base = 16;
 		}
+	}
+	for (; *p; ++p) {
+		if (*p == '.') break;
+		if (!((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))) {
+			print_error("unexpected character '%c' in number '%s'!", *p, s.c_str());
+		}
+		int x = *p - (*p >= 'a' ? ('a' - 10) : (*p >= 'A' ? ('A' - 10) : '0'));
+		if (x >= base) print_error("Invalid number '%s'!", s.c_str());
+		n = n * base + x;
 	}
 	return (minus ? -n : n);
 }
