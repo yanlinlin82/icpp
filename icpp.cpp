@@ -1198,28 +1198,13 @@ int run(int argc, const char** argv)
 	// vm register
 	int ax = 0, ip = 0, sp = MEM_SIZE, bp = MEM_SIZE;
 
-	auto it = override_functions.find("main");
-	if (it == override_functions.end() || it->second.empty()) {
-		err("main() not defined!\n");
-		return -1;
-	}
-	if (it->second.size() > 1) {
-		err("duplcated definition of main()!\n");
-		return -1;
-	}
-	auto it2 = symbols.find(*(it->second.begin()));
-	ip = get<1>(it2->second);
-
-	log<1>("\nSystem Information:\n"
-			"  sizeof(int) = %zd\n"
-			"  sizeof(void*) = %zd\n"
-			"\n", sizeof(int), sizeof(void*));
+	int loading_position = 0;
 
 	// load code & data
 	log<1>("Loading program\n  code: %zd word(s)\n  data: %zd word(s)\n\n",
 			code_sec.size(), data_sec.size());
 
-	size_t offset = 0;
+	size_t offset = loading_position;
 	for (size_t i = 0; i < code_sec.size(); ++i) {
 		m[offset++] = code_sec[i];
 	}
@@ -1242,12 +1227,30 @@ int run(int argc, const char** argv)
 	}
 	log<2>("\n");
 
+	// find start entry
+	auto it = override_functions.find("main");
+	if (it == override_functions.end() || it->second.empty()) {
+		err("main() not defined!\n");
+		return -1;
+	}
+	if (it->second.size() > 1) {
+		err("duplcated definition of main()!\n");
+		return -1;
+	}
+	auto it2 = symbols.find(*(it->second.begin()));
+	ip = get<1>(it2->second);
+
 	// prepare stack
 	m[--sp] = EXIT; // the last code (at the bottom of stack)
 	int t = sp;
 	m[--sp] = argc; // prepare stack for main() return
 	m[--sp] = static_cast<int>(reinterpret_cast<size_t>(argv)); // TODO: fix truncated
 	m[--sp] = t;
+
+	log<1>("System Information:\n"
+			"  sizeof(int) = %zd\n"
+			"  sizeof(void*) = %zd\n"
+			"\n", sizeof(int), sizeof(void*));
 
 	size_t cycle = 0;
 	for (;;) {
