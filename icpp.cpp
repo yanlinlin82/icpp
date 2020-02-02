@@ -122,10 +122,11 @@ unordered_set<string> returned_functions;
 vector<int> code_sec;
 vector<int> data_sec;
 
+size_t external_data_size = 0;
+size_t external_code_size = 0;
+
 // [ { offset-of-instru, [ symbol-name => { offset-in-stack-frame, size, type } ] } ]
 vector<pair<int, unordered_map<string, tuple<int, int, string>>>> stack_frame_table;
-vector<int> reloc_table;
-vector<int> ext_table;
 unordered_map<size_t, string> comments;
 
 enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
@@ -217,13 +218,15 @@ auto add_variable(string name, vector<int> val, string type) -> pair<bool, size_
 
 void print_stack_frame()
 {
-	log("[DEBUG] current stack frame has %zd variable\n", stack_frame_table.back().second.size());
-	size_t i = 0;
-	for (auto it = stack_frame_table.back().second.begin();
-			it != stack_frame_table.back().second.end();
-			++it) {
-		auto [ offset, size, type ] = it->second;
-		log("[DEBUG] [%zd] '%s': offset=%d, size=%d, type='%s'\n", i++, it->first.c_str(), offset, size, type.c_str());
+	if (verbose >= 4) {
+		log("[DEBUG] current stack frame has %zd variable\n", stack_frame_table.back().second.size());
+		size_t i = 0;
+		for (auto it = stack_frame_table.back().second.begin();
+				it != stack_frame_table.back().second.end();
+				++it) {
+			auto [ offset, size, type ] = it->second;
+			log("[DEBUG] [%zd] '%s': offset=%d, size=%d, type='%s'\n", i++, it->first.c_str(), offset, size, type.c_str());
+		}
 	}
 }
 
@@ -232,7 +235,7 @@ void add_argument(string name, string type, size_t offset)
 	log<3>("[DEBUG] add argument '%s', type = '%s'\n", name.c_str(), type.c_str());
 	auto& stack_frame = stack_frame_table.back().second;
 	stack_frame.insert(make_pair(name, make_tuple(2 + offset, 1, type)));
-	if (verbose >= 4) print_stack_frame();
+	print_stack_frame();
 }
 
 void add_code_symbol(string name, string args_type, string ret_type, int arg_count)
@@ -241,12 +244,72 @@ void add_code_symbol(string name, string args_type, string ret_type, int arg_cou
 	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type, arg_count);
 }
 
+size_t print_code(const vector<int>& mem, size_t ip)
+{
+	size_t code_offset = ip;
+	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
+	size_t i = mem[ip++];
+	if (i <= RET) {
+		log("%s", machine_code_name[i]);
+	} else {
+		log("<invalid-code> (0x%08zX)", i);
+	}
+	if (machine_code_has_parameter(i)) {
+		int v = mem[ip++];
+		log("\t0x%08zX (%d)", v, v);
+		auto it = comments.find(code_offset);
+		if (it != comments.end()) {
+			log("\t; %s", it->second.c_str());
+		}
+	}
+	log(COLOR_NORMAL "\n");
+	return ip;
+}
+
+size_t add_assembly_code(machine_code action, int param = 0, string comment = "")
+{
+	auto it = offset.find(line_no);
+	if (it == offset.end()) {
+		offset.insert(make_pair(line_no, make_pair(code_sec.size(), code_sec.size())));
+	} else {
+		it->second.second = code_sec.size();
+	}
+	size_t code_offset = code_sec.size();
+	code_sec.push_back(action);
+	if (machine_code_has_parameter(action)) {
+		if (action == CALL) {
+			param -= code_sec.size() + 1; // use relative address
+		}
+		code_sec.push_back(param);
+	}
+	if (!comment.empty()) {
+		comments.insert(make_pair(code_offset, comment));
+	}
+	if (verbose >= 3) {
+		if (next_display_machine_code < code_sec.size()) {
+			log(COLOR_BLUE);
+			while (next_display_machine_code < code_sec.size()) {
+				next_display_machine_code = print_code(code_sec, next_display_machine_code);
+			}
+			log(COLOR_NORMAL);
+		}
+	}
+	return code_offset;
+}
+
 void add_external_symbol(string name, string args_type, string ret_type = "", int arg_count = 0)
 {
-	size_t offset = ++ext_symbol_counter;
-	string name2 = name + (ret_type.empty() ? "" : args_type);
-	override_functions[name].insert(name2);
-	add_symbol(name2, ext_symbol, offset, 0, args_type, ret_type, arg_count);
+	if (ret_type.empty()) { // data
+		size_t offset = data_sec.size();
+		add_symbol(name, data_symbol, offset, 1, args_type, "", 0);
+		data_sec.resize(offset + 1);
+	} else { // code
+		size_t offset = code_sec.size();
+		string name2 = name + "(" + args_type + ")";
+		override_functions[name].insert(name2);
+		add_symbol(name2, code_symbol, offset, 2, args_type, ret_type, arg_count);
+		add_assembly_code(RET, arg_count, ret_type + " " + name2);
+	}
 }
 
 vector<int> prepare_string(const string& s)
@@ -262,68 +325,6 @@ string alloc_name()
 {
 	static size_t counter = 0;
 	return "@" + to_string(++counter);
-}
-
-size_t print_code(const vector<int>& mem, size_t ip, int data_offset, int ext_offset)
-{
-	size_t code_offset = ip;
-	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
-	size_t i = mem[ip++];
-	if (i <= RET) {
-		log("%s", machine_code_name[i]);
-	} else {
-		log("<invalid-code> (0x%08zX)", i);
-	}
-	if (machine_code_has_parameter(i)) {
-		bool is_reloc = (binary_search(reloc_table.begin(), reloc_table.end(), ip));
-		bool is_ext = (binary_search(ext_table.begin(), ext_table.end(), ip));
-		int v = mem[ip++];
-		if (is_reloc || is_ext) log(is_reloc ? COLOR_GREEN : COLOR_RED);
-		log("\t0x%08zX (%d)", v, v);
-		if (is_reloc || is_ext) log(COLOR_BLUE);
-
-		auto it = comments.find(code_offset);
-		if (it != comments.end()) {
-			log("\t; %s", it->second.c_str());
-		}
-	}
-	log(COLOR_NORMAL "\n");
-	return ip;
-}
-
-size_t add_assembly_code(machine_code action, int param = 0,
-		bool relocate = false, bool extranal = false, string comment = "")
-{
-	auto it = offset.find(line_no);
-	if (it == offset.end()) {
-		offset.insert(make_pair(line_no, make_pair(code_sec.size(), code_sec.size())));
-	} else {
-		it->second.second = code_sec.size();
-	}
-	size_t code_offset = code_sec.size();
-	code_sec.push_back(action);
-	if (machine_code_has_parameter(action)) {
-		size_t addr_offset = code_sec.size();
-		if (relocate) reloc_table.push_back(addr_offset);
-		if (extranal) ext_table.push_back(addr_offset);
-		if (action == CALL) {
-			param -= code_sec.size() + 1; // use relative address
-		}
-		code_sec.push_back(param);
-	}
-	if (!comment.empty()) {
-		comments.insert(make_pair(code_offset, comment));
-	}
-	if (verbose >= 3) {
-		if (next_display_machine_code < code_sec.size()) {
-			log(COLOR_BLUE);
-			while (next_display_machine_code < code_sec.size()) {
-				next_display_machine_code = print_code(code_sec, next_display_machine_code, 0, 0);
-			}
-			log(COLOR_NORMAL);
-		}
-	}
-	return code_offset;
 }
 
 void next()
@@ -521,7 +522,7 @@ auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, str
 auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
 {
 	log<4>("[DEBUG] query symbol: '%s'\n", s.c_str());
-	if (verbose >= 4) print_stack_frame();
+	print_stack_frame();
 
 	bool found = false;
 	bool is_global = false;
@@ -558,11 +559,7 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 		auto [ stype_2, offset_2, size, t, ret_type, arg_count ] = it->second;
 		stype = stype_2;
 		offset = offset_2;
-		if (!ret_type.empty()) {
-			type_name = "(*)" + t;
-		} else {
-			type_name = t;
-		}
+		type_name = t;
 	}
 	log<3>("[DEBUG] symbol '%s': type='%s', offset=%zd, type='%s', style='%s'\n",
 			s.c_str(), (is_global ? "global" : "local"), offset,
@@ -603,7 +600,7 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 			print_error("symbol '%s' is not a function!\n", name.c_str());
 		}
 		add_assembly_code(PUSH);
-		add_assembly_code(CALL, offset, false, (stype == ext_symbol), ret_type + " " + name);
+		add_assembly_code(CALL, offset, ret_type + " " + name);
 		type_names.push_back(ret_type);
 	}
 }
@@ -632,7 +629,7 @@ string parse_expression(bool before_comma = false)
 			string name = alloc_name();
 			string type_name = "const char*";
 			size_t offset = add_const_string(name, mem, type_name);
-			add_assembly_code(MOV, offset, true, false, name + "\t" + type_name);
+			add_assembly_code(MOV, offset, name + "\t" + type_name);
 			type_names.push_back("const char*");
 			next();
 		} else if (type == symbol) {
@@ -645,7 +642,6 @@ string parse_expression(bool before_comma = false)
 				name += token; next();
 			}
 			if (token == "(") {
-				// TODO: function calling
 				log<3>("[DEBUG] call function '%s'\n", name.c_str());
 				next();
 				vector<string> arg_types;
@@ -653,7 +649,7 @@ string parse_expression(bool before_comma = false)
 					for (;;) {
 						string type = parse_expression(true);
 						arg_types.push_back(type);
-						add_assembly_code(PUSH, 0, false, false, "");
+						add_assembly_code(PUSH);
 						if (token == ")") break;
 						expect_token(",", "function '" + name + "'");
 						next();
@@ -665,8 +661,7 @@ string parse_expression(bool before_comma = false)
 				auto [ offset, ret_type, stype ] = query_function(name, arg_types);
 				string type_name;
 				for (auto e : arg_types) type_name += (type_name.empty() ? "" : ",") + e;
-				add_assembly_code(CALL, offset, false, (stype == ext_symbol),
-						ret_type + " " + name + "(" + type_name + ")");
+				add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
 				type_names.push_back(ret_type);
 				log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
 			} else if (token == "++" || token == "--") {
@@ -686,22 +681,24 @@ string parse_expression(bool before_comma = false)
 				next();
 			} else {
 				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
-				bool is_reloc = (stype == data_symbol);
-				bool is_ext = (stype == ext_symbol);
 				if (is_global) {
 					if (type_name == "int") {
-						add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type_name);
+						add_assembly_code(GET, offset, name + "\t" + type_name);
 					} else {
-						add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type_name);
+						add_assembly_code(LEA, offset, name + "\t" + type_name);
 					}
 				} else {
 					if (type_name == "int") {
-						add_assembly_code(LGET, offset, false, false, name + "\t" + type_name);
+						add_assembly_code(LGET, offset, name + "\t" + type_name);
 					} else {
-						add_assembly_code(LLEA, offset, false, false, name + "\t" + type_name);
+						add_assembly_code(LLEA, offset, name + "\t" + type_name);
 					}
 				}
-				type_names.push_back(type_name);
+				if (stype == code_symbol) {
+					type_names.push_back("(*)(" + type_name + ")");
+				} else {
+					type_names.push_back(type_name);
+				}
 				last_name = name;
 			}
 		} else if (token == ";") {
@@ -746,15 +743,11 @@ string parse_expression(bool before_comma = false)
 void parse_init_statement()
 {
 	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
-
 	string type_name = parse_type_name();
 	string type_prefix = type_name;
 	string name = token; next();
-	if (verbose >= 3) {
-		log("[DEBUG] => function/variable '%s', type='%s'\n",
-				name.c_str(), type_name.c_str());
-	}
 	if (token == "(") { // function
+		log<3>("[DEBUG] => function '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		if (!scopes.empty() && scopes.back().first != "function") {
 			print_error("nesting function is not allowed!\n");
 		}
@@ -785,8 +778,8 @@ void parse_init_statement()
 		for (size_t i = 0; i < args.size(); ++i) {
 			add_argument(args[i].second, args[i].first, i);
 		}
-		next();
 	} else { // variable
+		log<3>("[DEBUG] => variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		for (;;) {
 			vector<int> init(1);
 			if (token == "=") {
@@ -794,9 +787,9 @@ void parse_init_statement()
 				parse_expression(true);
 				auto [ is_global, offset ] = add_variable(name, init, type_name);
 				if (is_global) {
-					add_assembly_code(PUT, offset, true, false, name + "\t" + type_name);
+					add_assembly_code(PUT, offset, name + "\t" + type_name);
 				} else {
-					add_assembly_code(LPUT, offset, false, false, name + "\t" + type_name);
+					add_assembly_code(LPUT, offset, name + "\t" + type_name);
 				}
 			}
 			if (token != ",") break;
@@ -807,14 +800,11 @@ void parse_init_statement()
 				next();
 			}
 			name = token; next();
-			if (verbose >= 3) {
-				log("[DEBUG] => another variable '%s', type='%s'\n",
-						name.c_str(), type_name.c_str());
-			}
+			log<3>("[DEBUG] => another variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		}
 		expect_token(";", "variable");
-		next();
 	}
+	next();
 }
 
 void parse_statements()
@@ -914,14 +904,8 @@ void parse_enum()
 			value = token;
 			next();
 		}
-		if (verbose >= 2) {
-			log("[DEBUG] enum %s: %s", name.c_str(), enum_key.c_str());
-			if (!value.empty()) {
-				log(" = %s", value.c_str());
-			}
-			log("\n");
-		}
-
+		log<3>("[DEBUG] enum %s: %s%s%s\n", name.c_str(), enum_key.c_str(),
+				(value.empty() ? "" : " = "), value.c_str());
 		if (token == "}") break;
 		expect_token(",", "enum " + name);
 		next();
@@ -930,7 +914,7 @@ void parse_enum()
 	next(); // skip '}'
 	expect_token(";", "enum " + name);
 	next(); // skip ';'
-	log<1>("[DEBUG] end of enum %s\n", name.c_str());
+	log<3>("[DEBUG] end of enum %s\n", name.c_str());
 }
 
 bool load(string filename)
@@ -950,21 +934,23 @@ bool load(string filename)
 
 void init_symbol()
 {
-	log<2>("[INFO] prepare external symbols\n");
+	log<3>("[DEBUG] prepare external symbols\n");
 	add_external_symbol("cout", "ostream");
 	add_external_symbol("cerr", "ostream");
-	add_external_symbol("endl", "(endl_t)", "void");
-	add_external_symbol("operator<<", "(ostream,int)",         "ostream");
-	add_external_symbol("operator<<", "(ostream,double)",      "ostream");
-	add_external_symbol("operator<<", "(ostream,const char*)", "ostream");
-	add_external_symbol("operator<<", "(ostream,(*)(endl_t))",   "ostream");
-	log<1>("[INFO] total %zd symbols are prepared\n", symbols.size());
-	if (verbose >= 2) {
+	add_external_symbol("endl", "endl_t", "void", 1);
+	add_external_symbol("operator<<", "ostream,int",         "ostream", 2);
+	add_external_symbol("operator<<", "ostream,double",      "ostream", 2);
+	add_external_symbol("operator<<", "ostream,const char*", "ostream", 2);
+	add_external_symbol("operator<<", "ostream,(*)(endl_t)", "ostream", 2);
+	log<3>("[DEBUG] total %zd symbols are prepared\n", symbols.size());
+	external_data_size = data_sec.size();
+	external_code_size = code_sec.size();
+	if (verbose >= 3) {
 		size_t i = 0;
 		for (auto it = symbols.begin(); it != symbols.end(); ++it) {
 			auto name = it->first;
 			auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
-			log("[INFO] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count\n",
+			log("[DEBUG] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count=%d\n",
 					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str(), arg_count);
 		}
 	}
@@ -983,11 +969,11 @@ void parse()
 		if (token == "using") {
 			next(); while (!token.empty() && token != ";") next();
 			if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
-			log<2>("[INFO] => 'using' statement skipped\n");
+			log<3>("[DEBUG] => 'using' statement skipped\n");
 			next();
 		} else if (token == "typedef") {
 			skip_until(";", token);
-			log<2>("[INFO] => 'typedef' statement skipped\n");
+			log<3>("[DEBUG] => 'typedef' statement skipped\n");
 			next();
 		} else if (token == "enum") {
 			parse_enum();
@@ -998,14 +984,14 @@ void parse()
 			next();
 			expect_token("{", keyword + " " + name);
 			scopes.push_back(make_pair(keyword, name));
-			log<2>("[INFO] => (%s %s) start\n", keyword.c_str(), name.c_str());
+			log<3>("[DEBUG] => (%s %s) start\n", keyword.c_str(), name.c_str());
 			next();
 		} else if (token == "template") {
 			skip_until(";", token);
-			log<2>("[INFO] => 'template' statement skipped\n");
+			log<3>("[DEBUG] => 'template' statement skipped\n");
 			next();
 		} else if (token == ";") {
-			log<2>("[INFO] => ';' - end of statement\n");
+			log<3>("[DEBUG] => ';' - end of statement\n");
 			next();
 		} else if (token == "}") {
 			string scope_type;
@@ -1022,7 +1008,7 @@ void parse()
 				}
 				current_function = make_tuple("", "", "", 0);
 			}
-			log<2>("[INFO] => '}' - end of block (%s,%s)\n",
+			log<3>("[DEBUG] => '}' - end of block (%s,%s)\n",
 					scope_type.c_str(), scope_name.c_str());
 			stack_frame_table.pop_back();
 			next();
@@ -1034,20 +1020,25 @@ void parse()
 
 int show()
 {
+	if (verbose >= 1) {
+		for (size_t i = 0; i < external_code_size;) {
+			i = print_code(code_sec, i);
+		}
+	}
 	for (size_t i = 0; i < src.size(); ++i) {
 		print_source_code_line(i);
 		auto it = offset.find(i + 1);
 		if (it != offset.end()) {
 			log(COLOR_BLUE);
 			for (size_t j = it->second.first; j <= it->second.second;) {
-				j = print_code(code_sec, j, 0, 0);
+				j = print_code(code_sec, j);
 			}
 			log(COLOR_NORMAL);
 		}
 	}
 	log("\n");
 
-	for (size_t i = 0; i < data_sec.size(); ++i) {
+	for (size_t i = (verbose >= 1 ? 0 : external_data_size); i < data_sec.size(); ++i) {
 		auto it = offset_to_symbol[data_symbol].find(i);
 		if (it != offset_to_symbol[data_symbol].end()) {
 			auto name = it->second;
@@ -1081,20 +1072,6 @@ int show()
 			log(COLOR_NORMAL "\n");
 		}
 	}
-
-	log<1>("relocate table (%zd items):\n", reloc_table.size());
-	for (size_t i = 0; i < reloc_table.size(); ++i) {
-		log<1>("\t0x%08x", reloc_table[i]);
-		if (i % 5 == 4) log<1>("\n");
-	}
-	if (reloc_table.size() % 5 != 0) log<1>("\n");
-
-	log<1>("external table (%zd items):\n", ext_table.size());
-	for (size_t i = 0; i < ext_table.size(); ++i) {
-		log<1>("\t0x%08x", ext_table[i]);
-		if (i % 5 == 4) log<1>("\n");
-	}
-	if (ext_table.size() % 5 != 0) log<1>("\n");
 	return 0;
 }
 
@@ -1123,38 +1100,28 @@ void print_vm_env(int ax, int ip, int sp, int bp)
 	return;
 }
 
-string get_symbol(symbol_type stype, size_t offset,
-		size_t data_offset, size_t ext_offset)
+string get_symbol(symbol_type stype, size_t offset)
 {
-	size_t original_offset = offset;
-	if (original_offset >= ext_offset) {
-		original_offset -= ext_offset;
-		stype = ext_symbol;
-	} else if (original_offset >= data_offset) {
-		original_offset -= data_offset;
-		stype = data_symbol;
-	}
 	log<2>("offset_to_symbol[%d].size() = %zd\n", stype, offset_to_symbol[stype].size());
 	for (auto it = offset_to_symbol[stype].begin(); it != offset_to_symbol[stype].end(); ++it) {
 		log<2>("offset_to_symbol[%s]: %zd => '%s'\n", symbol_type_text[stype], it->first, it->second.c_str());
 	}
-	auto it = offset_to_symbol[stype].find(original_offset);
+	auto it = offset_to_symbol[stype].find(offset);
 	if (it == offset_to_symbol[stype].end()) {
-		err("Unknown symbol offset '%zd' (stype = '%s', original_offset = %zd)\n",
-				offset, symbol_type_text[stype], original_offset);
+		err("Unknown symbol offset '%zd' (stype = '%s')\n", offset, symbol_type_text[stype]);
 		exit(1);
 	}
 	return it->second;
 }
 
-auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset) -> pair<int, int> // [ ax, RET <n> ]
+int call_ext(const string& name, int sp)
 {
 	log<3>("[DEBUG] external call: %s\n", name.c_str());
 	if (name == "operator<<(ostream,int)") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
+		log<3>("[DEBUG] args: %d, %d\n", a, b);
+		string aa = get_symbol(data_symbol, a);
 		if (aa == "cout") {
 			cout << b;
 		} else if (aa == "cerr") {
@@ -1163,12 +1130,12 @@ auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return make_pair(a, 2);
+		return a;
 	} else if (name == "operator<<(ostream,const char*)") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
+		log<3>("[DEBUG] args: %d, %d\n", a, b);
+		string aa = get_symbol(data_symbol, a);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
 		if (aa == "cout") {
 			cout << s;
@@ -1178,12 +1145,12 @@ auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return make_pair(a, 2);
+		return a;
 	} else if (name == "operator<<(ostream,(*)(endl_t))") {
 		int b = m[sp + 1];
 		int a = m[sp + 2];
-		log<2>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a, data_offset, ext_offset);
+		log<3>("[DEBUG] args: %d, %d\n", a, b);
+		string aa = get_symbol(data_symbol, a);
 		if (aa == "cout") {
 			cout << endl;
 		} else if (aa == "cerr") {
@@ -1192,7 +1159,7 @@ auto call_ext(const string& name, int sp, size_t data_offset, size_t ext_offset)
 			err("Unsupported operator<< for %d('%s')\n", m[a], aa.c_str());
 			exit(1);
 		}
-		return make_pair(a, 2);
+		return a;
 	} else {
 		err("Unsupported function '%s'\n", name.c_str());
 		exit(1);
@@ -1205,32 +1172,16 @@ int run(int argc, const char** argv)
 	int ax = 0, ip = 0, sp = MEM_SIZE, bp = MEM_SIZE;
 
 	// load code & data
-	const int loading_position = 0;
-	log<1>("Loading program\n  code: %zd word(s)\n  data: %zd word(s)\n\n",
-			code_sec.size(), data_sec.size());
+	log<1>("Loading program\n  data: %zd word(s)\n  code: %zd word(s)\n\n",
+			data_sec.size(), code_sec.size());
 
-	size_t offset = loading_position;
-	for (size_t i = 0; i < code_sec.size(); ++i) {
-		m[offset++] = code_sec[i];
-	}
-	size_t data_offset = offset;
-	log<2>("data_offset = %zd\n", data_offset);
+	size_t loaded = 0;
 	for (size_t i = 0; i < data_sec.size(); ++i) {
-		m[offset++] = data_sec[i];
+		m[loaded++] = data_sec[i];
 	}
-	for (size_t i = 0; i < reloc_table.size(); ++i) {
-		log<2>("relocate: 0x%08X, 0x%08X", reloc_table[i], m[reloc_table[i]]);
-		m[reloc_table[i]] += data_offset;
-		log<2>(" => 0x%08X\n", m[reloc_table[i]]);
+	for (size_t i = 0; i < code_sec.size(); ++i) {
+		m[loaded++] = code_sec[i];
 	}
-	size_t ext_offset = offset;
-	log<2>("ext_offset = %zd\n", ext_offset);
-	for (size_t i = 0; i < ext_table.size(); ++i) {
-		log<2>("external: 0x%08X, 0x%08X", ext_table[i], m[ext_table[i]]);
-		m[ext_table[i]] += ext_offset;
-		log<2>(" => 0x%08X\n", m[ext_table[i]]);
-	}
-	log<2>("\n");
 
 	// find start entry
 	auto it = override_functions.find("main");
@@ -1243,7 +1194,7 @@ int run(int argc, const char** argv)
 		return -1;
 	}
 	auto it2 = symbols.find(*(it->second.begin()));
-	ip = loading_position + get<1>(it2->second);
+	ip = data_sec.size() + get<1>(it2->second);
 
 	// prepare stack
 	m[--sp] = EXIT; // the last code (at the bottom of stack)
@@ -1262,7 +1213,7 @@ int run(int argc, const char** argv)
 		++cycle;
 		if (verbose >= 1) {
 			log("%zd:\t", cycle);
-			print_code(m, ip, data_offset, ext_offset);
+			print_code(m, ip);
 			if (verbose >= 2) {
 				print_vm_env(ax, ip, sp, bp);
 			}
@@ -1288,18 +1239,17 @@ int run(int argc, const char** argv)
 		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / a, and pop out
 		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % a, and pop out
 
-		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++]; } // enter stack frame
-		else if (i == LEAVE) { sp = bp; bp = m[sp++];                } // leave stack frame
-		else if (i == CALL ) { m[--sp] = ip + 1; ip += m[ip++];      } // call subroutine
-		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n; } // exit subroutine
+		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];       } // enter stack frame
+		else if (i == LEAVE) { sp = bp; bp = m[sp++];                      } // leave stack frame
+		else if (i == CALL ) { m[--sp] = ip + 1; int n = m[ip++]; ip += n; } // call subroutine
+		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n;       } // exit subroutine
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 
-		if (static_cast<size_t>(ip) >= ext_offset) {
-			auto it = offset_to_symbol[ext_symbol].find(ip - ext_offset);
-			if (it != offset_to_symbol[ext_symbol].end()) {
-				auto [ r, n ] = call_ext(it->second, sp, data_offset, ext_offset);
-				ax = r; ip = m[sp++]; sp += n;
+		if (ip < static_cast<int>(data_sec.size() + external_code_size)) {
+			auto it = offset_to_symbol[code_symbol].find(ip - data_sec.size());
+			if (it != offset_to_symbol[code_symbol].end()) {
+				ax = call_ext(it->second, sp);
 			}
 		}
 	}
