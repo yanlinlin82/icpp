@@ -36,17 +36,19 @@ const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
 enum machine_code {
-	EXIT,    PUSH,    POP,
-	MOV,     LEA,     GET,    PUT,   LLEA,  LGET, LPUT,
-	ADD,     SUB,     MUL,    DIV,   MOD,
-	SHL,     SHR,     AND,    OR,
-	EQ,      NE,      GE,     GT,    LE,    LT,   LAND, LOR,
-	ENTER,   LEAVE,   CALL,   RET
+	EXIT,  PUSH,  POP,
+	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
+	SGET,  SPUT,  XCHG,
+	ADD,   SUB,   MUL,  DIV, MOD,
+	SHL,   SHR,   AND,  OR,
+	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,
+	ENTER, LEAVE, CALL, RET
 };
 
 const char* machine_code_name =
 	"EXIT  PUSH  POP   "
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
+	"SGET  SPUT  XCHG  "
 	"ADD   SUB   MUL   DIV   MOD   "
 	"SHL   SHR   AND   OR    "
 	"EQ    NE    GE    GT    LE    LT    LAND  LOR   "
@@ -253,7 +255,7 @@ size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_positio
 	log(COLOR_YELLOW "%-10zd" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
 	if (i <= RET) {
-		log("%-12.5s", &machine_code_name[i * 6]);
+		log("%-12.6s", &machine_code_name[i * 6]);
 	} else {
 		log("<0x%08zX>", i);
 	}
@@ -674,6 +676,18 @@ string parse_expression(bool before_comma = false)
 				add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
 				type_names.push_back(ret_type);
 				log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
+			} else if (token == "=") {
+				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
+				if (is_global) {
+					add_assembly_code(LEA, offset, name + "\t" + type_name);
+				} else {
+					add_assembly_code(LLEA, offset, name + "\t" + type_name);
+				}
+				add_assembly_code(PUSH);
+				next();
+				parse_expression(true);
+				add_assembly_code(SPUT, offset, name + "\t" + type_name);
+				type_names.push_back(type_name);
 			} else if (token == "++" || token == "--") {
 				// TODO: operator++ | operator--
 				next();
@@ -792,10 +806,10 @@ void parse_init_statement()
 		log<3>("[DEBUG] => variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		for (;;) {
 			vector<int> init(1);
+			auto [ is_global, offset ] = add_variable(name, init, type_name);
 			if (token == "=") {
 				next();
 				parse_expression(true);
-				auto [ is_global, offset ] = add_variable(name, init, type_name);
 				if (is_global) {
 					add_assembly_code(PUT, offset, name + "\t" + type_name);
 				} else {
@@ -1241,9 +1255,13 @@ int run(int argc, const char** argv)
 		else if (i == LEA ) { ax = m[ip++];         } // load address to ax
 		else if (i == GET ) { ax = m[m[ip++]];      } // get memory to ax
 		else if (i == PUT ) { m[m[ip++]] = ax;      } // put ax to memory
-		else if (i == LLEA) { ax = bp - m[ip++];    } // load local address to ax
+		else if (i == LLEA) { ax = bp + m[ip++];    } // load local address to ax
 		else if (i == LGET) { ax = m[bp + m[ip++]]; } // get local to ax
 		else if (i == LPUT) { m[bp + m[ip++]] = ax; } // put ax to local
+
+		else if (i == SGET) { ax = m[m[sp++]];      } // get [stack] to ax
+		else if (i == SPUT) { m[m[sp++]] = ax;      } // put ax to [stack]
+		else if (i == XCHG) { swap(ax, m[sp++]);    } // swap ax and [stack]
 
 		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + a, and pop out
 		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - a, and pop out
@@ -1265,10 +1283,10 @@ int run(int argc, const char** argv)
 		else if (i == LAND) { ax = m[sp++] && ax;   } // stack (top) && a, and pop out
 		else if (i == LOR ) { ax = m[sp++] || ax;   } // stack (top) || a, and pop out
 
-		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];       } // enter stack frame
-		else if (i == LEAVE) { sp = bp; bp = m[sp++];                      } // leave stack frame
-		else if (i == CALL ) { m[--sp] = ip + 1; int n = m[ip++]; ip += n; } // call subroutine
-		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n;       } // exit subroutine
+		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];   } // enter stack frame
+		else if (i == LEAVE) { sp = bp; bp = m[sp++];                  } // leave stack frame
+		else if (i == CALL ) { int n = m[ip++]; m[--sp] = ip; ip += n; } // call subroutine
+		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n;   } // exit subroutine
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 
