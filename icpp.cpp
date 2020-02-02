@@ -36,18 +36,21 @@ const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
 enum machine_code {
-	EXIT,  PUSH,  POP,
-	ADD,   SUB,   MUL,  DIV, MOD,
-	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
-	ENTER, LEAVE, CALL, RET
+	EXIT,    PUSH,    POP,
+	MOV,     LEA,     GET,    PUT,   LLEA,  LGET, LPUT,
+	ADD,     SUB,     MUL,    DIV,   MOD,
+	SHL,     SHR,     AND,    OR,
+	EQ,      NE,      GE,     GT,    LE,    LT,   LAND, LOR,
+	ENTER,   LEAVE,   CALL,   RET
 };
 
-const char* machine_code_name[] = {
-	"EXIT",  "PUSH",  "POP",
-	"ADD",   "SUB",   "MUL",  "DIV", "MOD",
-	"MOV",   "LEA",   "GET",  "PUT", "LLEA", "LGET", "LPUT",
-	"ENTER", "LEAVE", "CALL", "RET",
-};
+const char* machine_code_name =
+	"EXIT  PUSH  POP   "
+	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
+	"ADD   SUB   MUL   DIV   MOD   "
+	"SHL   SHR   AND   OR    "
+	"EQ    NE    GE    GT    LE    LT    LAND  LOR   "
+	"ENTER LEAVE CALL  RET   ";
 
 inline bool machine_code_has_parameter(int code)
 {
@@ -250,7 +253,7 @@ size_t print_code(const vector<int>& mem, size_t ip)
 	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
 	if (i <= RET) {
-		log("%s", machine_code_name[i]);
+		log("%8.5s", &machine_code_name[i * 6]);
 	} else {
 		log("<invalid-code> (0x%08zX)", i);
 	}
@@ -575,19 +578,24 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 	string b_type = type_names.back(); type_names.pop_back();
 	string a_type = type_names.back(); type_names.pop_back();
 	if (a_type == "int" && b_type == "int") {
-		if (op_name == "+") {
-			add_assembly_code(ADD);
-		} else if (op_name == "-") {
-			add_assembly_code(SUB);
-		} else if (op_name == "*") {
-			add_assembly_code(MUL);
-		} else if (op_name == "/") {
-			add_assembly_code(DIV);
-		} else if (op_name == "%") {
-			add_assembly_code(MOD);
-		} else {
-			print_error("Unsupported operator '%s'\n", op_name.c_str());
-		}
+		if      (op_name == "+" ) add_assembly_code(ADD);
+		else if (op_name == "-" ) add_assembly_code(SUB);
+		else if (op_name == "*" ) add_assembly_code(MUL);
+		else if (op_name == "/" ) add_assembly_code(DIV);
+		else if (op_name == "%" ) add_assembly_code(MOD);
+		else if (op_name == "<<") add_assembly_code(SHL);
+		else if (op_name == ">>") add_assembly_code(SHR);
+		else if (op_name == "&" ) add_assembly_code(AND);
+		else if (op_name == "|" ) add_assembly_code(OR);
+		else if (op_name == "==") add_assembly_code(EQ);
+		else if (op_name == "!=") add_assembly_code(NE);
+		else if (op_name == ">=") add_assembly_code(GE);
+		else if (op_name == ">" ) add_assembly_code(GT);
+		else if (op_name == "<=") add_assembly_code(LE);
+		else if (op_name == "<" ) add_assembly_code(LT);
+		else if (op_name == "&&") add_assembly_code(LAND);
+		else if (op_name == "||") add_assembly_code(LOR);
+		else print_error("Unsupported operator '%s'\n", op_name.c_str());
 		type_names.push_back("int");
 	} else {
 		string name = "operator" + op_name + "(" + a_type + "," + b_type + ")";
@@ -1221,7 +1229,6 @@ int run(int argc, const char** argv)
 		size_t i = m[ip++];
 
 		if      (i == EXIT) { break;                } // exit the program
-
 		else if (i == PUSH) { m[--sp] = ax;         } // push ax to stack
 		else if (i == POP ) { ax = m[sp++];         } // pop ax from stack
 
@@ -1238,6 +1245,20 @@ int run(int argc, const char** argv)
 		else if (i == MUL ) { ax = m[sp++] * ax;    } // stack (top) * a, and pop out
 		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / a, and pop out
 		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % a, and pop out
+
+		else if (i == SHL ) { ax = m[sp++] >> ax;   } // stack (top) >> a, and pop out
+		else if (i == SHR ) { ax = m[sp++] << ax;   } // stack (top) << a, and pop out
+		else if (i == AND ) { ax = m[sp++] & ax;    } // stack (top) & a, and pop out
+		else if (i == OR  ) { ax = m[sp++] | ax;    } // stack (top) | a, and pop out
+
+		else if (i == EQ  ) { ax = m[sp++] == ax;   } // stack (top) == a, and pop out
+		else if (i == NE  ) { ax = m[sp++] != ax;   } // stack (top) != a, and pop out
+		else if (i == GE  ) { ax = m[sp++] >= ax;   } // stack (top) >= a, and pop out
+		else if (i == GT  ) { ax = m[sp++] >  ax;   } // stack (top) >  a, and pop out
+		else if (i == LE  ) { ax = m[sp++] <= ax;   } // stack (top) <= a, and pop out
+		else if (i == LT  ) { ax = m[sp++] <  ax;   } // stack (top) <  a, and pop out
+		else if (i == LAND) { ax = m[sp++] && ax;   } // stack (top) && a, and pop out
+		else if (i == LOR ) { ax = m[sp++] || ax;   } // stack (top) || a, and pop out
 
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];       } // enter stack frame
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                      } // leave stack frame
