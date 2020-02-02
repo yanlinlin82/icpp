@@ -407,11 +407,6 @@ string vector_to_string(const vector<string>& a)
 	string s; for (auto e : a) s += (s.empty() ? "" : ",") + e; return "[" + s + "]";
 }
 
-string code_vector_to_string(const vector<pair<token_type, string>>& a)
-{
-	string s; for (auto e : a) s += (s.empty() ? "" : "','") + e.second; return "['" + s + "']";
-}
-
 int eval_number(string s) // TODO: support long long and float/double
 {
 	int n = 0;
@@ -463,7 +458,8 @@ bool is_built_in_type()
 	return (token == "char" || token == "short" || token == "int" ||
 			token == "long" || token == "longlong" ||
 			token == "float" || token == "double" ||
-			token == "signed" || token == "unsigned");
+			token == "signed" || token == "unsigned" ||
+			token == "size_t");
 }
 
 string parse_type_name()
@@ -505,6 +501,9 @@ string parse_type_name()
 			type_name += (type_name.empty() ? "" : " ");
 			type_name += e.second;
 		}
+	}
+	if (type_name == "size_t") { // TODO: support typedef
+		type_name = "int";
 	}
 	return type_name;
 }
@@ -625,10 +624,8 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 string parse_expression(bool before_comma = false)
 {
 	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
-
 	vector<string> stack{"#"};
 	vector<string> type_names;
-	string last_name = "";
 	while (!token.empty()) {
 		log<4>("> token='%s', type=%s, stack=%s, type_names=%s\n",
 				token.c_str(), token_type_text[type],
@@ -652,6 +649,8 @@ string parse_expression(bool before_comma = false)
 		} else if (type == symbol) {
 			if (!type_names.empty()) add_assembly_code(PUSH);
 			string name = token;
+			if (name == "sizeof") { // TODO: support sizeof()
+			}
 			next();
 			while (token == "::") {
 				name += token; next();
@@ -728,7 +727,6 @@ string parse_expression(bool before_comma = false)
 				} else {
 					type_names.push_back(type_name);
 				}
-				last_name = name;
 			}
 		} else if (token == ";") {
 			break;
@@ -833,7 +831,6 @@ void parse_init_statement()
 		}
 		expect_token(";", "variable");
 	}
-	next();
 }
 
 void parse_statements()
@@ -897,6 +894,7 @@ void parse_statements()
 	} else if (token == "auto" || token == "const" || token == "static" ||
 			token == "extern" || is_built_in_type()) { // start as type
 		parse_init_statement();
+		next();
 	} else {
 		parse_expression();
 		expect_token(";", "statement");
