@@ -106,7 +106,7 @@ unordered_map<string, int> operator_precedence = {
 
 	{ ",", 17 },
 
-	{ "(", 99 }, { "#", 99 },
+	{ "(", 99 }, { ";", 99 }
 };
 
 //--------------------------------------------------------//
@@ -621,12 +621,39 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 	}
 }
 
-string parse_expression(bool before_comma = false)
+string parse_expression(string stop_token);
+
+string parse_function(string name)
 {
-	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
-	vector<string> stack{"#"};
+	log<3>("[DEBUG] %s: '%s'\n", __FUNCTION__, name.c_str());
+	next();
+	vector<string> arg_types;
+	if (token != ")") {
+		for (;;) {
+			string type = parse_expression(",");
+			arg_types.push_back(type);
+			add_assembly_code(PUSH);
+			if (token == ")") break;
+			expect_token(",", "function '" + name + "'");
+			next();
+		}
+	}
+	expect_token(")", "function '" + name + "'");
+	log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
+	auto [ offset, ret_type, stype ] = query_function(name, arg_types);
+	string type_name = vector_to_string(arg_types);
+	add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
+	log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
+	return ret_type;
+}
+
+string parse_expression(string stop_token = ";")
+{
+	log<3>("[DEBUG] > %s (stop at '%s'):\n", __FUNCTION__, stop_token.c_str());
+	vector<string> stack{stop_token};
 	vector<string> type_names;
-	while (!token.empty()) {
+	bool last_is_operand = false;
+	while (!token.empty() && token != stop_token) {
 		log<4>("> token='%s', type=%s, stack=%s, type_names=%s\n",
 				token.c_str(), token_type_text[type],
 				vector_to_string(stack).c_str(), vector_to_string(type_names).c_str());
@@ -636,6 +663,7 @@ string parse_expression(bool before_comma = false)
 			add_assembly_code(MOV, v);
 			type_names.push_back("int");
 			next();
+			last_is_operand = true;
 		} else if (type == text) {
 			if (!type_names.empty()) add_assembly_code(PUSH);
 			string v = eval_string(token);
@@ -646,11 +674,31 @@ string parse_expression(bool before_comma = false)
 			add_assembly_code(MOV, offset, name + "\t" + type_name);
 			type_names.push_back("const char*");
 			next();
+			last_is_operand = true;
+		} else if (token == "sizeof") { // TODO: support sizeof()
+			next(); expect_token("(", "sizeof");
+			next(); parse_expression();
+			next(); expect_token(")", "sizeof");
+			next();
+			last_is_operand = true;
+		} else if (token == "(") {
+			stack.push_back(token);
+			next();
+			last_is_operand = false;
+		} else if (token == ")") {
+			while (stack.back() != "(" && stack.back() != stop_token) {
+				build_code_for_op(stack.back(), type_names);
+				stack.pop_back();
+			}
+			if (stack.back() == stop_token) {
+				break;
+			}
+			stack.pop_back(); // pop out "("
+			next();
+			last_is_operand = true;
 		} else if (type == symbol) {
 			if (!type_names.empty()) add_assembly_code(PUSH);
 			string name = token;
-			if (name == "sizeof") { // TODO: support sizeof()
-			}
 			next();
 			while (token == "::") {
 				name += token; next();
@@ -658,28 +706,9 @@ string parse_expression(bool before_comma = false)
 				name += token; next();
 			}
 			if (token == "(") {
-				log<3>("[DEBUG] call function '%s'\n", name.c_str());
-				next();
-				vector<string> arg_types;
-				if (token != ")") {
-					for (;;) {
-						string type = parse_expression(true);
-						arg_types.push_back(type);
-						add_assembly_code(PUSH);
-						if (token == ")") break;
-						expect_token(",", "function '" + name + "'");
-						next();
-					}
-				}
-				expect_token(")", "function '" + name + "'");
-				next();
-				log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
-				auto [ offset, ret_type, stype ] = query_function(name, arg_types);
-				string type_name;
-				for (auto e : arg_types) type_name += (type_name.empty() ? "" : ",") + e;
-				add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
+				string ret_type = parse_function(name);
 				type_names.push_back(ret_type);
-				log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
+				next();
 			} else if (token == "=") {
 				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
 				if (is_global) {
@@ -689,10 +718,10 @@ string parse_expression(bool before_comma = false)
 				}
 				add_assembly_code(PUSH);
 				next();
-				parse_expression(true);
+				parse_expression(",");
 				add_assembly_code(SPUT, offset, name + "\t" + type_name);
 				type_names.push_back(type_name);
-			} else if (token == "++" || token == "--") {
+			} else if (token == "++" || token == "--") { // suffix/postfix
 				// TODO: operator++ | operator--
 				next();
 			} else if (token == "{") {
@@ -728,28 +757,23 @@ string parse_expression(bool before_comma = false)
 					type_names.push_back(type_name);
 				}
 			}
-		} else if (token == ";") {
-			break;
-		} else if (token == "(") {
-			stack.push_back(token);
+			last_is_operand = true;
+		} else if (!last_is_operand &&
+				(token == "++" || token == "--" ||
+				 token == "+" || token == "-" ||
+				 token == "~" || token == "!" ||
+				 token == "*" || token == "&")) { // prefix
+			string op_name = token;
 			next();
-		} else if (token == ")") {
-			while (stack.back() != "(" && stack.back() != "#") {
-				build_code_for_op(stack.back(), type_names);
-				stack.pop_back();
-			}
-			if (stack.back() == "#") {
-				break;
-			}
-			stack.pop_back(); // pop out "("
-			next();
+			parse_expression(token);
+			last_is_operand = false;
 		} else {
-			if (token == "," && before_comma) break;
+			if (precedence(token) >= precedence(stop_token)) break;
 			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
 					token.c_str(), precedence(token),
 					stack.back().c_str(), precedence(stack.back()));
 			while (precedence(token) >= precedence(stack.back()) &&
-					stack.back() != "#") {
+					stack.back() != stop_token) {
 				build_code_for_op(stack.back(), type_names);
 				stack.pop_back();
 			}
@@ -757,7 +781,7 @@ string parse_expression(bool before_comma = false)
 			next();
 		}
 	}
-	while (stack.back() != "#") {
+	while (stack.back() != stop_token) {
 		build_code_for_op(stack.back(), type_names);
 		stack.pop_back();
 	}
@@ -812,7 +836,7 @@ void parse_init_statement()
 			auto [ is_global, offset ] = add_variable(name, init, type_name);
 			if (token == "=") {
 				next();
-				parse_expression(true);
+				parse_expression(",");
 				if (is_global) {
 					add_assembly_code(PUT, offset, name + "\t" + type_name);
 				} else {
