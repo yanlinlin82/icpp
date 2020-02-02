@@ -250,19 +250,21 @@ void add_code_symbol(string name, string args_type, string ret_type, int arg_cou
 size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_position = 0)
 {
 	size_t code_offset = ip;
-	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
+	log(COLOR_YELLOW "%-10zd" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
 	if (i <= RET) {
-		log("%8.5s", &machine_code_name[i * 6]);
+		log("%-12.5s", &machine_code_name[i * 6]);
 	} else {
-		log("<invalid-code> (0x%08zX)", i);
+		log("<0x%08zX>", i);
 	}
 	if (machine_code_has_parameter(i)) {
 		int v = mem[ip++];
-		log("\t0x%08zX (%d)", v, v);
+		char buf[64];
+		snprintf(buf, sizeof(buf), "0x%08X (%d)", v, v);
+		log("%-25s", buf);
 		auto it = comments.find(code_offset - code_loading_position);
 		if (it != comments.end()) {
-			log("\t; %s", it->second.c_str());
+			log(" ; %s", it->second.c_str());
 		}
 	}
 	log(COLOR_NORMAL "\n");
@@ -1053,31 +1055,38 @@ int show()
 			auto [ stype, offset, size, type, ret_type, arg_count ] = symbols[name];
 			string data_type = "word";
 			if (type == "const char*") data_type = "byte";
-			log(COLOR_YELLOW "%d", i);
-			log(COLOR_BLUE "\t.%s\t", data_type.c_str());
+			log(COLOR_YELLOW "%-10zd", i);
+			log(COLOR_BLUE ".%-11s", data_type.c_str());
+			size_t width = 0;
 			if (type == "const char*") {
-				log("\"");
+				log("\""); ++width;
 				const char* s = reinterpret_cast<const char*>(&data_sec[offset]);
-				for (size_t i = 0; i < size * sizeof(int); ++i) {
+				for (size_t i = 0; i + 1 < size * sizeof(int); ++i) {
 					switch (s[i]) {
-						default: log("%c", s[i]); break;
-						case '\t': log("\\t"); break;
-						case '\r': log("\\r"); break;
-						case '\n': log("\\n"); break;
-						case '\\': log("\\\\"); break;
-						case '\'': log("\\\'"); break;
-						case '\"': log("\\\""); break;
+						default: log("%c", s[i]); ++width; break;
+						case '\t': log("\\t"); width += 2; break;
+						case '\r': log("\\r"); width += 2; break;
+						case '\n': log("\\n"); width += 2; break;
+						case '\\': log("\\\\"); width += 2; break;
+						case '\'': log("\\\'"); width += 2; break;
+						case '\"': log("\\\""); width += 2; break;
+						case '\0': log("\\0"); width += 2; break;
 					}
 				}
-				log("\"");
+				log("\""); ++width;
 			} else {
 				for (size_t i = 0; i < size; ++i) {
+					if (i > 0) { log("  "); width += 2; }
 					log("0x%08X", static_cast<unsigned int>(data_sec[offset + i]));
+					width += 10;
 				}
 			}
-			log("\t; %s", name.c_str());
-			log("\t%s", type.c_str());
-			log(COLOR_NORMAL "\n");
+			if (width > 25) {
+				log("\n%*s", (10 + 12 + 25), "");
+			} else {
+				log("%*s", 25 - width, "");
+			}
+			log(" ; %s %s" COLOR_NORMAL "\n", type.c_str(), name.c_str());
 		}
 	}
 	return 0;
