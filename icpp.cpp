@@ -40,8 +40,8 @@ enum machine_code {
 	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
 	SGET,  SPUT,  XCHG,
 	ADD,   SUB,   MUL,  DIV, MOD,
-	SHL,   SHR,   AND,  OR,
-	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,
+	SHL,   SHR,   AND,  OR,  NOT,
+	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,  LNOT,
 	ENTER, LEAVE, CALL, RET
 };
 
@@ -50,8 +50,8 @@ const char* machine_code_name =
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
 	"SGET  SPUT  XCHG  "
 	"ADD   SUB   MUL   DIV   MOD   "
-	"SHL   SHR   AND   OR    "
-	"EQ    NE    GE    GT    LE    LT    LAND  LOR   "
+	"SHL   SHR   AND   OR    NOT   "
+	"EQ    NE    GE    GT    LE    LT    LAND  LOR   LNOT  "
 	"ENTER LEAVE CALL  RET   ";
 
 inline bool machine_code_has_parameter(int code)
@@ -649,7 +649,9 @@ string parse_function(string name)
 
 string parse_expression(string stop_token = ";")
 {
-	log<3>("[DEBUG] > %s (stop at '%s'):\n", __FUNCTION__, stop_token.c_str());
+	log<3>("[DEBUG] > %s (stop at '%s', token = '%s'):\n",
+			__FUNCTION__, stop_token.c_str(), token.c_str());
+
 	vector<string> stack{stop_token};
 	vector<string> type_names;
 	bool last_is_operand = false;
@@ -1300,6 +1302,7 @@ int run(int argc, const char** argv)
 		else if (i == SHR ) { ax = m[sp++] << ax;   } // stack (top) << a, and pop out
 		else if (i == AND ) { ax = m[sp++] & ax;    } // stack (top) & a, and pop out
 		else if (i == OR  ) { ax = m[sp++] | ax;    } // stack (top) | a, and pop out
+		else if (i == NOT ) { ax = ~ax;             } // a = ~a
 
 		else if (i == EQ  ) { ax = m[sp++] == ax;   } // stack (top) == a, and pop out
 		else if (i == NE  ) { ax = m[sp++] != ax;   } // stack (top) != a, and pop out
@@ -1309,6 +1312,7 @@ int run(int argc, const char** argv)
 		else if (i == LT  ) { ax = m[sp++] <  ax;   } // stack (top) <  a, and pop out
 		else if (i == LAND) { ax = m[sp++] && ax;   } // stack (top) && a, and pop out
 		else if (i == LOR ) { ax = m[sp++] || ax;   } // stack (top) || a, and pop out
+		else if (i == LNOT) { ax = !ax;             } // a = !a
 
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];   } // enter stack frame
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                  } // leave stack frame
