@@ -130,11 +130,13 @@ unordered_map<size_t, string> comments;
 
 enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
 const char* symbol_type_text[] = { "data", "code", "external" };
-unordered_map<string, tuple<symbol_type, size_t, size_t, string, string>> symbols; // name => { symbol_type, offset, size, type, ret_type }
+unordered_map<string, tuple<symbol_type, size_t, size_t, string, string, int>> symbols; // name => { symbol_type, offset, size, type, ret_type, arg_count }
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
 
 unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start, offset_end ]
+
+tuple<string, string, string, int> current_function; // name, arg_types, ret_type, arg_count
 
 size_t ext_symbol_counter = 0;
 
@@ -175,12 +177,12 @@ void print_error(const char* fmt, ...)
 }
 
 void add_symbol(string name, symbol_type stype,
-		size_t offset, size_t size, string type, string ret_type)
+		size_t offset, size_t size, string type, string ret_type, int arg_count)
 {
-	log<3>("[DEBUG] add %s symbol: '%s', offset=%zd, size=%zd, type='%s', ret_type='%s'\n",
+	log<3>("[DEBUG] add %s symbol: '%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count = %d\n",
 			symbol_type_text[stype], name.c_str(),
-			offset, size, type.c_str(), ret_type.c_str());
-	symbols[name] = make_tuple(stype, offset, size, type, ret_type);
+			offset, size, type.c_str(), ret_type.c_str(), arg_count);
+	symbols[name] = make_tuple(stype, offset, size, type, ret_type, arg_count);
 	if (offset_to_symbol[stype].find(offset) != offset_to_symbol[stype].end()) {
 		print_error("offset %zd has already existsed! existed '%s', now adding '%s'\n",
 				offset, offset_to_symbol[stype][offset].c_str(), name.c_str());
@@ -191,7 +193,7 @@ void add_symbol(string name, symbol_type stype,
 size_t add_const_string(string name, vector<int> val, string type)
 {
 	size_t offset = data_sec.size();
-	add_symbol(name, data_symbol, offset, val.size(), type, "");
+	add_symbol(name, data_symbol, offset, val.size(), type, "", 0);
 	data_sec.insert(data_sec.end(), val.begin(), val.end());
 	return offset;
 }
@@ -201,7 +203,7 @@ auto add_variable(string name, vector<int> val, string type) -> pair<bool, size_
 	log<3>("[DEBUG] add variable '%s', type = '%s'\n", name.c_str(), type.c_str());
 	if (stack_frame_table.empty()) {
 		size_t offset = data_sec.size();
-		add_symbol(name, data_symbol, offset, val.size(), type, "");
+		add_symbol(name, data_symbol, offset, val.size(), type, "", 0);
 		data_sec.insert(data_sec.end(), val.begin(), val.end());
 		return make_pair(true, offset);
 	} else {
@@ -229,22 +231,22 @@ void add_argument(string name, string type, size_t offset)
 {
 	log<3>("[DEBUG] add argument '%s', type = '%s'\n", name.c_str(), type.c_str());
 	auto& stack_frame = stack_frame_table.back().second;
-	stack_frame.insert(make_pair(name, make_tuple(-offset, 1, type)));
+	stack_frame.insert(make_pair(name, make_tuple(2 + offset, 1, type)));
 	if (verbose >= 4) print_stack_frame();
 }
 
-void add_code_symbol(string name, string args_type, string ret_type)
+void add_code_symbol(string name, string args_type, string ret_type, int arg_count)
 {
 	override_functions[name].insert(name + args_type);
-	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type);
+	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type, arg_count);
 }
 
-void add_external_symbol(string name, string args_type, string ret_type = "")
+void add_external_symbol(string name, string args_type, string ret_type = "", int arg_count = 0)
 {
 	size_t offset = ++ext_symbol_counter;
 	string name2 = name + (ret_type.empty() ? "" : args_type);
 	override_functions[name].insert(name2);
-	add_symbol(name2, ext_symbol, offset, 0, args_type, ret_type);
+	add_symbol(name2, ext_symbol, offset, 0, args_type, ret_type, arg_count);
 }
 
 vector<int> prepare_string(const string& s)
@@ -491,6 +493,28 @@ string parse_type_name()
 	return type_name;
 }
 
+auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, string, symbol_type> // offset, arg_types, stype
+{
+	auto it = override_functions.find(name);
+	if (it == override_functions.end()) {
+		print_error("function '%s' not defined!\n", name.c_str());
+	}
+	string type_name;
+	for (auto e : arg_types) type_name += (type_name.empty() ? "" : ",") + e;
+	for (auto it2 = it->second.begin(); it2 != it->second.end(); ++it2) {
+		if (*it2 == name + "(" + type_name + ")") {
+			auto it3 = symbols.find(*it2);
+			if (it3 == symbols.end()) {
+				print_error("unexpected runtime error!\n");
+			}
+			auto [ stype, offset, size, type_name, ret_type, arg_count ] = it3->second;
+			return make_tuple(offset, ret_type, stype);
+		}
+	}
+	print_error("function '%s' not matched!\n", name.c_str());
+	exit(1);
+}
+
 auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
 {
 	log<4>("[DEBUG] query symbol: '%s'\n", s.c_str());
@@ -528,7 +552,7 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 				print_error("unknown symbol '%s'!\n", s.c_str());
 			}
 		}
-		auto [ stype_2, offset_2, size, t, ret_type ] = it->second;
+		auto [ stype_2, offset_2, size, t, ret_type, arg_count ] = it->second;
 		stype = stype_2;
 		offset = offset_2;
 		if (!ret_type.empty()) {
@@ -571,7 +595,7 @@ void build_code_for_op(string op_name, vector<string>& type_names)
 		if (it == symbols.end()) {
 			print_error("Unknown function '%s'\n", name.c_str());
 		}
-		auto [ stype, offset, size, type_name, ret_type ] = it->second;
+		auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
 		if (stype != code_symbol && stype != ext_symbol) {
 			print_error("symbol '%s' is not a function!\n", name.c_str());
 		}
@@ -587,9 +611,8 @@ string parse_expression(bool before_comma = false)
 
 	vector<string> stack{"#"};
 	vector<string> type_names;
-	token_type last_token_type = unknown;
 	string last_name = "";
-	for (; !token.empty(); last_token_type = type, next()) {
+	while (!token.empty()) {
 		log<4>("> token='%s', type=%s, stack=%s, type_names=%s\n",
 				token.c_str(), token_type_text[type],
 				vector_to_string(stack).c_str(), vector_to_string(type_names).c_str());
@@ -598,6 +621,7 @@ string parse_expression(bool before_comma = false)
 			int v = eval_number(token);
 			add_assembly_code(MOV, v);
 			type_names.push_back("int");
+			next();
 		} else if (type == text) {
 			if (!type_names.empty()) add_assembly_code(PUSH);
 			string v = eval_string(token);
@@ -607,32 +631,19 @@ string parse_expression(bool before_comma = false)
 			size_t offset = add_const_string(name, mem, type_name);
 			add_assembly_code(MOV, offset, true, false, name + "\t" + type_name);
 			type_names.push_back("const char*");
+			next();
 		} else if (type == symbol) {
 			if (!type_names.empty()) add_assembly_code(PUSH);
-			auto [ is_global, offset, type_name, stype ] = query_symbol(token);
-			bool is_reloc = (stype == data_symbol);
-			bool is_ext = (stype == ext_symbol);
 			string name = token;
-			if (is_global) {
-				if (type_name == "int") {
-					add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type_name);
-				} else {
-					add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type_name);
-				}
-			} else {
-				if (type_name == "int") {
-					add_assembly_code(LGET, offset, false, false, name + "\t" + type_name);
-				} else {
-					add_assembly_code(LLEA, offset, false, false, name + "\t" + type_name);
-				}
+			next();
+			while (token == "::") {
+				name += token; next();
+				if (type != symbol) { print_error("unexpected token after '::'!\n"); }
+				name += token; next();
 			}
-			type_names.push_back(type_name);
-			last_name = name;
-		} else if (token == ";") {
-			break;
-		} else if (token == "(") {
-			if (last_token_type == symbol) {
-				string name = last_name;
+			if (token == "(") {
+				// TODO: function calling
+				log<3>("[DEBUG] call function '%s'\n", name.c_str());
 				next();
 				vector<string> arg_types;
 				if (token != ")") {
@@ -647,17 +658,51 @@ string parse_expression(bool before_comma = false)
 				}
 				expect_token(")", "function '" + name + "'");
 				next();
-				log("function '%s' has %zd args\n", name.c_str(), arg_types.size());
-				auto it = symbols.find(name);
-				if (it == symbols.end()) {
-					print_error("function '%s' not defined!", name.c_str());
-				}
-				auto [ stype, offset, size, type_name, ret_type ] = it->second;
+				log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
+				auto [ offset, ret_type, stype ] = query_function(name, arg_types);
 				add_assembly_code(CALL, offset, false, (stype == ext_symbol));
 				type_names.push_back(ret_type);
+				log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
+			} else if (token == "++" || token == "--") {
+				// TODO: operator++ | operator--
+				next();
+			} else if (token == "{") {
+				// TODO: initializer
+				skip_until("}", "");
+			} else if (token == "[") {
+				// TODO: array
+				skip_until("]", "");
+			} else if (token == "." || token == "->") {
+				// TODO: find member
+				next();
+			} else if (token == ".*" || token == "->*") {
+				// TODO: find member
+				next();
 			} else {
-				stack.push_back(token);
+				auto [ is_global, offset, type_name, stype ] = query_symbol(name);
+				bool is_reloc = (stype == data_symbol);
+				bool is_ext = (stype == ext_symbol);
+				if (is_global) {
+					if (type_name == "int") {
+						add_assembly_code(GET, offset, is_reloc, is_ext, name + "\t" + type_name);
+					} else {
+						add_assembly_code(LEA, offset, is_reloc, is_ext, name + "\t" + type_name);
+					}
+				} else {
+					if (type_name == "int") {
+						add_assembly_code(LGET, offset, false, false, name + "\t" + type_name);
+					} else {
+						add_assembly_code(LLEA, offset, false, false, name + "\t" + type_name);
+					}
+				}
+				type_names.push_back(type_name);
+				last_name = name;
 			}
+		} else if (token == ";") {
+			break;
+		} else if (token == "(") {
+			stack.push_back(token);
+			next();
 		} else if (token == ")") {
 			while (stack.back() != "(" && stack.back() != "#") {
 				build_code_for_op(stack.back(), type_names);
@@ -667,6 +712,7 @@ string parse_expression(bool before_comma = false)
 				break;
 			}
 			stack.pop_back(); // pop out "("
+			next();
 		} else {
 			if (token == "," && before_comma) break;
 			log<4>("[DEBUG] compare op in parse_expression: '%s' => %d, '%s' => %d\n",
@@ -678,6 +724,7 @@ string parse_expression(bool before_comma = false)
 				stack.pop_back();
 			}
 			stack.push_back(token);
+			next();
 		}
 	}
 	while (stack.back() != "#") {
@@ -722,10 +769,11 @@ void parse_init_statement()
 			args_type += (i == 0 ? "" : ",") + args[i].first;
 		}
 		args_type += ")";
-		add_code_symbol(name, args_type, type_name);
-		next();
+		add_code_symbol(name, args_type, type_name, args.size());
 		scopes.push_back(make_pair("function", name));
-		expect_token("{", "function " + name);
+		current_function = make_tuple(name, args_type, type_name, args.size());
+		next();
+		expect_token("{", "function '" + name + "', '" + name + type_name + "'");
 		size_t offset = add_assembly_code(ENTER);
 		stack_frame_table.push_back(make_pair(offset + 1, unordered_map<string, tuple<int, int, string>>()));
 		for (size_t i = 0; i < args.size(); ++i) {
@@ -814,9 +862,9 @@ void parse_statements()
 		}
 		expect_token(";", "return");
 		add_assembly_code(LEAVE);
-		add_assembly_code(RET);
+		add_assembly_code(RET, get<3>(current_function));
 		next();
-		returned_functions.insert(name);
+		returned_functions.insert(get<0>(current_function));
 	} else if (token == "typedef") {
 		log<3>("[DEBUG] => statement 'typedef'\n");
 		skip_until(";", "typedef");
@@ -909,9 +957,9 @@ void init_symbol()
 		size_t i = 0;
 		for (auto it = symbols.begin(); it != symbols.end(); ++it) {
 			auto name = it->first;
-			auto [ stype, offset, size, type_name, ret_type ] = it->second;
-			log("[INFO] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s'\n",
-					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str());
+			auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
+			log("[INFO] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count\n",
+					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str(), arg_count);
 		}
 	}
 }
@@ -964,8 +1012,9 @@ void parse()
 			if (scope_type == "function") {
 				if (returned_functions.find(scope_name) == returned_functions.end()) {
 					add_assembly_code(LEAVE);
-					add_assembly_code(RET);
+					add_assembly_code(RET, get<3>(current_function));
 				}
+				current_function = make_tuple("", "", "", 0);
 			}
 			log<2>("[INFO] => '}' - end of block (%s,%s)\n",
 					scope_type.c_str(), scope_name.c_str());
@@ -996,7 +1045,7 @@ int show()
 		auto it = offset_to_symbol[data_symbol].find(i);
 		if (it != offset_to_symbol[data_symbol].end()) {
 			auto name = it->second;
-			auto [ stype, offset, size, type, ret_type ] = symbols[name];
+			auto [ stype, offset, size, type, ret_type, arg_count ] = symbols[name];
 			string data_type = "word";
 			if (type == "const char*") data_type = "byte";
 			log(COLOR_YELLOW "%d", i);
