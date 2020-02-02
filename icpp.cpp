@@ -247,7 +247,7 @@ void add_code_symbol(string name, string args_type, string ret_type, int arg_cou
 	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type, arg_count);
 }
 
-size_t print_code(const vector<int>& mem, size_t ip)
+size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_position = 0)
 {
 	size_t code_offset = ip;
 	log(COLOR_YELLOW "%zd\t" COLOR_BLUE, ip);
@@ -260,7 +260,7 @@ size_t print_code(const vector<int>& mem, size_t ip)
 	if (machine_code_has_parameter(i)) {
 		int v = mem[ip++];
 		log("\t0x%08zX (%d)", v, v);
-		auto it = comments.find(code_offset);
+		auto it = comments.find(code_offset - code_loading_position);
 		if (it != comments.end()) {
 			log("\t; %s", it->second.c_str());
 		}
@@ -1110,10 +1110,6 @@ void print_vm_env(int ax, int ip, int sp, int bp)
 
 string get_symbol(symbol_type stype, size_t offset)
 {
-	log<2>("offset_to_symbol[%d].size() = %zd\n", stype, offset_to_symbol[stype].size());
-	for (auto it = offset_to_symbol[stype].begin(); it != offset_to_symbol[stype].end(); ++it) {
-		log<2>("offset_to_symbol[%s]: %zd => '%s'\n", symbol_type_text[stype], it->first, it->second.c_str());
-	}
 	auto it = offset_to_symbol[stype].find(offset);
 	if (it == offset_to_symbol[stype].end()) {
 		err("Unknown symbol offset '%zd' (stype = '%s')\n", offset, symbol_type_text[stype]);
@@ -1221,7 +1217,7 @@ int run(int argc, const char** argv)
 		++cycle;
 		if (verbose >= 1) {
 			log("%zd:\t", cycle);
-			print_code(m, ip);
+			print_code(m, ip, data_sec.size());
 			if (verbose >= 2) {
 				print_vm_env(ax, ip, sp, bp);
 			}
