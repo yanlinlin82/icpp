@@ -407,16 +407,16 @@ void skip_until(string expected_token, string stat)
 
 int precedence(string token)
 {
-	if (operator_precedence.empty()) {
-		operator_precedence.insert(make_pair("::", 1));
-	}
 	auto it = operator_precedence.find(token);
-	return (it == operator_precedence.end() ? 0 : it->second);
+	if (it == operator_precedence.end()) {
+		print_error("unknown operator '%s'!\n", token.c_str());
+	}
+	return it->second;
 }
 
-string vector_to_string(const vector<string>& a)
+string vector_to_string(const vector<string>& a, string sep = ",")
 {
-	string s; for (auto e : a) s += (s.empty() ? "" : ",") + e; return "[" + s + "]";
+	string s; for (auto e : a) s += (s.empty() ? "" : sep) + e; return s;
 }
 
 int eval_number(string s) // TODO: support long long and float/double
@@ -530,8 +530,7 @@ auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, str
 	if (it == override_functions.end()) {
 		print_error("function '%s' not defined!\n", name.c_str());
 	}
-	string type_name;
-	for (auto e : arg_types) type_name += (type_name.empty() ? "" : ",") + e;
+	string type_name = vector_to_string(arg_types);
 	for (auto it2 = it->second.begin(); it2 != it->second.end(); ++it2) {
 		if (*it2 == name + "(" + type_name + ")") {
 			auto it3 = symbols.find(*it2);
@@ -1109,11 +1108,6 @@ void init_symbol()
 					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str(), arg_count);
 		}
 	}
-}
-
-string get_scopes_text()
-{
-	string s; for (auto e : scopes) s += (s.empty() ? "" : "::") + e.second; return s;
 }
 
 void parse()
