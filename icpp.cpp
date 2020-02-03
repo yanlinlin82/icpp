@@ -33,7 +33,7 @@ inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); warn(fmt
 //--------------------------------------------------------//
 // machine code definition
 
-const size_t MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
+const int MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
 enum machine_code {
@@ -109,7 +109,7 @@ unordered_map<string, int> operator_precedence = {
 
 	{ ",", 17 },
 
-	{ "(", 99 }, { ")", 99 }, { ";", 99 }
+	{ "(", 99 }, { ")", 99 }, { "]", 99 }, { "}", 99 }, { ";", 99 }
 };
 
 //--------------------------------------------------------//
@@ -242,7 +242,7 @@ void add_argument(string name, string type, size_t offset)
 {
 	log<3>("[DEBUG] add argument '%s', type = '%s'\n", name.c_str(), type.c_str());
 	auto& stack_frame = stack_frame_table.back().second;
-	stack_frame.insert(make_pair(name, make_tuple(2 + offset, 1, type)));
+	stack_frame.insert(make_pair(name, make_tuple(offset, 1, type)));
 	print_stack_frame();
 }
 
@@ -334,7 +334,7 @@ void add_external_symbol(string name, string args_type, string ret_type = "", in
 vector<int> prepare_string(const string& s)
 {
 	size_t bytes = s.size() + 1;
-	size_t size = (bytes + sizeof(int) + 1) / sizeof(int);
+	size_t size = (bytes + sizeof(int) - 1) / sizeof(int);
 	vector<int> a(size);
 	memcpy(&a[0], s.c_str(), bytes);
 	return a;
@@ -509,9 +509,13 @@ string parse_type_name()
 				next();
 			}
 		}
+		token_type last_token_type = unknown;
 		for (auto e : a) {
-			type_name += (type_name.empty() ? "" : " ");
+			if (e.first == symbol && last_token_type == symbol && !type_name.empty()) {
+				type_name += " ";
+			}
 			type_name += e.second;
+			last_token_type = e.first;
 		}
 	}
 	if (type_name == "size_t") { // TODO: support typedef
@@ -743,12 +747,34 @@ string parse_expression(string stop_token, int depth)
 			type_name = symbol_type_name;
 		} else if (token == "++" || token == "--") { // suffix/postfix
 			// TODO: ++ / --
+			next();
 		} else if (token == "{") {
 			// TODO: initializer
 			skip_until("}", "");
 		} else if (token == "[") {
-			// TODO: array
-			skip_until("]", "");
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (is_global) {
+				add_assembly_code(GET, offset, name + "\t" + type_name);
+			} else {
+				add_assembly_code(LGET, offset, name + "\t" + type_name);
+			}
+			add_assembly_code(PUSH);
+			next();
+			parse_expression(";", depth + 1);
+			add_assembly_code(ADD);
+			add_assembly_code(PUSH);
+			add_assembly_code(SGET);
+			expect_token("]", "[");
+			next();
+			if (!symbol_type_name.empty()) {
+				if (symbol_type_name[symbol_type_name.size() - 1] == '*') {
+					symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
+					while (!symbol_type_name.empty() && symbol_type_name[symbol_type_name.size() - 1] == ' ') {
+						symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
+					}
+				}
+			}
+			type_name = symbol_type_name;
 		} else if (token == "." || token == "->") {
 			// TODO: find member
 			next();
@@ -827,7 +853,7 @@ void parse_init_statement()
 		size_t offset = add_assembly_code(ENTER);
 		stack_frame_table.push_back(make_pair(offset + 1, unordered_map<string, tuple<int, int, string>>()));
 		for (size_t i = 0; i < args.size(); ++i) {
-			add_argument(args[i].second, args[i].first, i);
+			add_argument(args[i].second, args[i].first, args.size() - i + 1);
 		}
 	} else { // variable
 		log<3>("[DEBUG] => variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
@@ -1070,16 +1096,15 @@ void parse()
 				scope_name = scopes.back().second;
 				scopes.pop_back();
 			}
+			log<3>("[DEBUG] => '}' - end of block (%s,%s)\n", scope_type.c_str(), scope_name.c_str());
 			if (scope_type == "function") {
 				if (returned_functions.find(scope_name) == returned_functions.end()) {
 					add_assembly_code(LEAVE);
 					add_assembly_code(RET, get<3>(current_function));
 				}
 				current_function = make_tuple("", "", "", 0);
+				stack_frame_table.pop_back();
 			}
-			log<3>("[DEBUG] => '}' - end of block (%s,%s)\n",
-					scope_type.c_str(), scope_name.c_str());
-			stack_frame_table.pop_back();
 			next();
 		} else {
 			parse_statements();
@@ -1257,6 +1282,7 @@ int run(int argc, const char** argv)
 	for (size_t i = 0; i < data_sec.size(); ++i) {
 		m[loaded++] = data_sec[i];
 	}
+	int code_loading_position = loaded;
 	for (size_t i = 0; i < code_sec.size(); ++i) {
 		m[loaded++] = code_sec[i];
 	}
@@ -1272,14 +1298,56 @@ int run(int argc, const char** argv)
 		return -1;
 	}
 	auto it2 = symbols.find(*(it->second.begin()));
-	ip = data_sec.size() + get<1>(it2->second);
+	ip = code_loading_position + get<1>(it2->second);
 
-	// prepare stack
-	m[--sp] = EXIT; // the last code (at the bottom of stack)
-	int t = sp;
-	m[--sp] = argc; // prepare stack for main() return
-	m[--sp] = static_cast<int>(reinterpret_cast<size_t>(argv)); // TODO: fix truncated
-	m[--sp] = t;
+	// prepare argc & argv
+	sp -= argc + 1;
+	int argv_copy = sp;
+	for (int i = 0; i < argc; ++i) {
+		size_t len = strlen(argv[i]);
+		size_t size = (len + sizeof(int)) / sizeof(int);
+		m[sp - 1] = 0;
+		sp -= size;
+		m[argv_copy + i] = sp;
+		memcpy(&m[sp], argv[i], len);
+	}
+	m[argv_copy + argc] = 0;
+	if (verbose >= 3) {
+		log("[DEBUG] prepare argc & argv:\n");
+		for (int i = sp; i < MEM_SIZE; i += 4) {
+			log("[DEBUG] %08X:  ", i);
+			for (int j = 0; j < 4; ++j) {
+				if (i + j < MEM_SIZE) {
+					const unsigned char* p = reinterpret_cast<const unsigned char*>(&m[i + j]);
+					log("%02X %02X %02X %02X  ", *p, *(p+1), *(p+2), *(p+3));
+				} else {
+					log("%*s", 13, "");
+				}
+			}
+			for (int j = 0; j < 4 && i + j < MEM_SIZE; ++j) {
+				const char* p = reinterpret_cast<const char*>(&m[i + j]);
+				for (int k = 0; k < 4; ++k) {
+					char c = *(p+k);
+					log("%c", (c >= 0x20 && c <= 0x7E) ? c : '.');
+				}
+			}
+			log("\n");
+		}
+		log("[DEBUG] argv_copy = 0x%08X\n\n", argv_copy);
+	}
+
+	// prepare stack for main()
+	bp = sp - 1;
+	m[--sp] = bp;
+	m[--sp] = EXIT; int exit_addr = sp;
+	m[--sp] = argc;
+	m[--sp] = argv_copy;
+	m[--sp] = exit_addr;
+	if (verbose >= 3) {
+		log("[DEBUG] stack for main():\n");
+		log("[DEBUG] stack: m[sp]... = [ %08X, %08X, %08X, %08X, %08X ]\n", m[sp], m[sp+1], m[sp+2], m[sp+3], m[sp+4]);
+		log("[DEBUG] ax = %08X, ip = %08X, bp = %08X, sp = %08X\n\n", ax, ip, bp, sp);
+	}
 
 	log<1>("System Information:\n"
 			"  sizeof(int) = %zd\n"
@@ -1291,7 +1359,7 @@ int run(int argc, const char** argv)
 		++cycle;
 		if (verbose >= 1) {
 			log("%zd:\t", cycle);
-			print_code(m, ip, data_sec.size());
+			print_code(m, ip, code_loading_position);
 			if (verbose >= 2) {
 				print_vm_env(ax, ip, sp, bp);
 			}
@@ -1349,8 +1417,8 @@ int run(int argc, const char** argv)
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 
-		if (ip < static_cast<int>(data_sec.size() + external_code_size)) {
-			auto it = offset_to_symbol[code_symbol].find(ip - data_sec.size());
+		if (ip && ip < static_cast<int>(code_loading_position + external_code_size)) {
+			auto it = offset_to_symbol[code_symbol].find(ip - code_loading_position);
 			if (it != offset_to_symbol[code_symbol].end()) {
 				ax = call_ext(it->second, sp);
 			}
@@ -1364,12 +1432,12 @@ int main(int argc, const char** argv)
 {
 	bool assembly = false;
 	const char* filename = nullptr;
-	for (int i = 1; i < argc; ++i) {
-		if (argv[i][0] == '-') {
-			if (argv[i][1] == 'v') { ++verbose; }
-			if (argv[i][1] == 's') { assembly = true; }
+	for (--argc, ++argv; argc > 0 && !filename; --argc, ++argv) {
+		if (**argv == '-') {
+			if (*(*argv+1) == 'v') { ++verbose; }
+			if (*(*argv+1) == 's') { assembly = true; }
 		} else {
-			filename = argv[i];
+			filename = *argv;
 		}
 	}
 	if (!filename) {
