@@ -1,4 +1,5 @@
-#include <cstdio>
+#include <iostream>
+using namespace std;
 
 int add(int a, int b)
 {
@@ -8,5 +9,6 @@ int add(int a, int b)
 int main()
 {
 	int a = 1, b = 2;
-	return add(a, b);
+	cout << "add(a, b) = " << add(a, b) << endl;
+	return 0;
 }
