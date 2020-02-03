@@ -1,5 +1,6 @@
 #include <cstring>
 #include <cstdarg>
+#include <cassert>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -39,27 +40,29 @@ enum machine_code {
 	EXIT,  PUSH,  POP,
 	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
 	SGET,  SPUT,  XCHG,
-	ADD,   SUB,   MUL,  DIV, MOD,
+	ADD,   SUB,   MUL,  DIV, MOD,  NEG,  INC,  DEC,
 	SHL,   SHR,   AND,  OR,  NOT,
 	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,  LNOT,
-	ENTER, LEAVE, CALL, RET
+	ENTER, LEAVE, CALL, RET, JMP,  JZ,   JNZ,
+	INVALID_CODE,
 };
 
 const char* machine_code_name =
 	"EXIT  PUSH  POP   "
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
 	"SGET  SPUT  XCHG  "
-	"ADD   SUB   MUL   DIV   MOD   "
+	"ADD   SUB   MUL   DIV   MOD   NEG   INC   DEC   "
 	"SHL   SHR   AND   OR    NOT   "
 	"EQ    NE    GE    GT    LE    LT    LAND  LOR   LNOT  "
-	"ENTER LEAVE CALL  RET   ";
+	"ENTER LEAVE CALL  RET   JMP   JZ    JNZ   ";
 
 inline bool machine_code_has_parameter(int code)
 {
 	return (code == MOV ||
 			code == LEA || code == GET || code == PUT ||
 			code == LLEA || code == LGET || code == LPUT ||
-			code == ENTER || code == CALL || code == RET);
+			code == ENTER || code == CALL || code == RET ||
+			code == JMP || code == JZ || code == JNZ);
 }
 
 //--------------------------------------------------------//
@@ -254,10 +257,10 @@ size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_positio
 	size_t code_offset = ip;
 	log(COLOR_YELLOW "%-10zd" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
-	if (i <= RET) {
-		log("%-12.6s", &machine_code_name[i * 6]);
+	if (i < INVALID_CODE) {
+		log("%-14.6s", &machine_code_name[i * 6]);
 	} else {
-		log("<0x%08zX>", i);
+		log("<0x%08zX>  ", i);
 	}
 	if (machine_code_has_parameter(i)) {
 		int v = mem[ip++];
@@ -267,6 +270,8 @@ size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_positio
 		auto it = comments.find(code_offset - code_loading_position);
 		if (it != comments.end()) {
 			log(" ; %s", it->second.c_str());
+		} else if (i == CALL || i == JMP || i == JZ || i == JNZ) {
+			log(" ; address %d", ip + v);
 		}
 	}
 	log(COLOR_NORMAL "\n");
@@ -284,7 +289,7 @@ size_t add_assembly_code(machine_code action, int param = 0, string comment = ""
 	size_t code_offset = code_sec.size();
 	code_sec.push_back(action);
 	if (machine_code_has_parameter(action)) {
-		if (action == CALL) {
+		if (action == CALL || action == JMP || action == JZ || action == JNZ) {
 			param -= code_sec.size() + 1; // use relative address
 		}
 		code_sec.push_back(param);
@@ -302,6 +307,13 @@ size_t add_assembly_code(machine_code action, int param = 0, string comment = ""
 		}
 	}
 	return code_offset;
+}
+
+void update_relative_address_here(size_t instrument_offset)
+{
+	int i = code_sec[instrument_offset];
+	assert(i == CALL || i == JMP || i == JZ || i == JNZ);
+	code_sec[instrument_offset + 1] = code_sec.size() - (instrument_offset + 2);
 }
 
 void add_external_symbol(string name, string args_type, string ret_type = "", int arg_count = 0)
@@ -616,7 +628,7 @@ string build_code_for_op(string a_type, string op_name, string b_type)
 	}
 }
 
-string parse_expression(string stop_token);
+string parse_expression(string stop_token = ";", int depth = 0);
 
 string parse_function(string name)
 {
@@ -639,13 +651,14 @@ string parse_function(string name)
 	string type_name = vector_to_string(arg_types);
 	add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
 	log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
+	next();
 	return ret_type;
 }
 
-string parse_expression(string stop_token = ";")
+string parse_expression(string stop_token, int depth)
 {
-	log<3>("[DEBUG] > %s (stop at '%s', token = '%s'):\n",
-			__FUNCTION__, stop_token.c_str(), token.c_str());
+	log<3>("[DEBUG] >(%d) %s (stop at '%s', token = '%s'):\n",
+			depth, __FUNCTION__, stop_token.c_str(), token.c_str());
 
 	if (type == number) {
 		int v = eval_number(token);
@@ -663,7 +676,7 @@ string parse_expression(string stop_token = ";")
 		return "const char*";
 	} else if (token == "sizeof") {
 		next(); expect_token("(", "sizeof");
-		next(); parse_expression();
+		next(); parse_expression(";", depth + 1);
 		next(); expect_token(")", "sizeof");
 		int size = sizeof(int);
 		add_assembly_code(MOV, size);
@@ -671,7 +684,7 @@ string parse_expression(string stop_token = ";")
 		return "int";
 	} else if (token == "(") {
 		next();
-		string type_name = parse_expression();
+		string type_name = parse_expression(";", depth + 1);
 		expect_token(")", "'(' in parse_expression");
 		next();
 		return type_name;
@@ -681,7 +694,31 @@ string parse_expression(string stop_token = ";")
 	if (type != symbol) { // prefix
 		string op_name = token;
 		next();
-		type_name = parse_expression(op_name);
+		if (op_name == "++" || op_name == "--") {
+			if (type != symbol) print_error("unexpected token ('%s') after '%s'!\n", token.c_str(), op_name.c_str());
+			string name = token;
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (symbol_type_name != "int") print_error("Operator '++' and '--' supports only 'int'!\n");
+			if (is_global) {
+				add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
+			} else {
+				add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+			}
+			if (op_name == "++") {
+				add_assembly_code(INC);
+			} else {
+				add_assembly_code(DEC);
+			}
+			if (is_global) {
+				add_assembly_code(PUT, offset, name + "\t" + symbol_type_name);
+			} else {
+				add_assembly_code(LPUT, offset, name + "\t" + symbol_type_name);
+			}
+			next();
+			type_name = "int";
+		} else {
+			type_name = parse_expression(op_name, depth + 1);
+		}
 	} else {
 		string name = token;
 		next();
@@ -692,7 +729,6 @@ string parse_expression(string stop_token = ";")
 		}
 		if (token == "(") {
 			type_name = parse_function(name);
-			next();
 		} else if (token == "=") {
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 			if (is_global) {
@@ -702,12 +738,11 @@ string parse_expression(string stop_token = ";")
 			}
 			add_assembly_code(PUSH);
 			next();
-			parse_expression(",");
+			parse_expression(",", depth + 1);
 			add_assembly_code(SPUT, offset, name + "\t" + type_name);
 			type_name = symbol_type_name;
 		} else if (token == "++" || token == "--") { // suffix/postfix
-			// TODO: operator++ | operator--
-			next();
+			// TODO: ++ / --
 		} else if (token == "{") {
 			// TODO: initializer
 			skip_until("}", "");
@@ -747,9 +782,12 @@ string parse_expression(string stop_token = ";")
 		string op_name = token;
 		next();
 		add_assembly_code(PUSH);
-		string b_type = parse_expression(op_name);
+		string b_type = parse_expression(op_name, depth + 1);
 		type_name = build_code_for_op(type_name, op_name, b_type);
 	}
+
+	log<3>("[DEBUG] >(%d) %s (stop at '%s', token = '%s') return '%s'\n",
+			depth, __FUNCTION__, stop_token.c_str(), token.c_str(), type_name.c_str());
 	return type_name;
 }
 
@@ -819,47 +857,61 @@ void parse_init_statement()
 	}
 }
 
-void parse_statements()
+void parse_statements(int depth = 0)
 {
-	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+	log<3>("[DEBUG] >(%d) %s: (token = '%s')\n", depth, __FUNCTION__, token.c_str());
 	if (token == "{") {
-		log<3>("[DEBUG] => statement '{'\n");
-		next(); while (!token.empty() && token != "}") parse_statements();
+		log<3>("[DEBUG] =>(%d) statement '{'\n", depth);
+		next(); while (!token.empty() && token != "}") parse_statements(depth + 1);
 		expect_token("}", "{");
 		next();
-	} if (token == "if") {
-		log<3>("[DEBUG] => statement 'if'\n");
+	} else if (token == "if") {
+		log<3>("[DEBUG] =>(%d) statement 'if'\n", depth);
 		next(); expect_token("(", "if");
 		next(); parse_expression(); expect_token(")", "if");
-		next(); parse_statements();
+		size_t code_offset_1 = add_assembly_code(JZ, code_sec.size() + 2);
+		next(); parse_statements(depth + 1);
 		if (token == "else") {
+			size_t code_offset_2 = add_assembly_code(JMP, code_sec.size() + 2);
+			update_relative_address_here(code_offset_1);
 			next();
-			parse_statements();
+			parse_statements(depth + 1);
+			update_relative_address_here(code_offset_2);
+		} else {
+			update_relative_address_here(code_offset_1);
 		}
 	} else if (token == "for") {
-		log<3>("[DEBUG] => statement 'for'\n");
+		log<3>("[DEBUG] =>(%d) statement 'for'\n", depth);
 		next(); expect_token("(", "for");
 		next(); parse_init_statement(); expect_token(";", "for");
+		size_t code_offset_1 = code_sec.size();
 		next(); parse_expression(); expect_token(";", "for");
+		size_t code_offset_2 = add_assembly_code(JZ, code_sec.size() + 2);
+		size_t code_offset_3 = add_assembly_code(JMP, code_sec.size() + 2);
+		size_t code_offset_4 = code_sec.size();
 		next(); parse_expression(); expect_token(")", "for");
+		add_assembly_code(JMP, code_offset_1);
+		update_relative_address_here(code_offset_3);
 		expect_token(")", "for");
-		next(); parse_statements();
+		next(); parse_statements(depth + 1);
+		add_assembly_code(JMP, code_offset_4);
+		update_relative_address_here(code_offset_2);
 	} else if (token == "while") {
-		log<3>("[DEBUG] => statement 'while'\n");
+		log<3>("[DEBUG] =>(%d) statement 'while'\n", depth);
 		next(); expect_token("(", "while");
 		next(); parse_expression(); expect_token(")", "while");
-		next(); parse_statements();
+		next(); parse_statements(depth + 1);
 	} else if (token == "do") {
-		log<3>("[DEBUG] => statement 'do'\n");
+		log<3>("[DEBUG] =>(%d) statement 'do'\n", depth);
 		next(); expect_token("{", "do");
-		parse_statements();
+		parse_statements(depth + 1);
 		expect_token("while", "do");
 		next(); expect_token("(", "do");
 		next(); parse_expression();
 		next(); expect_token(")", "do");
 		next(); expect_token(";", "do");
 	} else if (token == "return") {
-		log<3>("[DEBUG] => statement 'return'\n");
+		log<3>("[DEBUG] =>(%d) statement 'return'\n", depth);
 		next();
 		if (scopes.empty() || scopes.back().first != "function") {
 			print_error("unexpected 'return' statement!\n");
@@ -874,18 +926,22 @@ void parse_statements()
 		next();
 		returned_functions.insert(get<0>(current_function));
 	} else if (token == "typedef") {
-		log<3>("[DEBUG] => statement 'typedef'\n");
+		log<3>("[DEBUG] =>(%d) statement 'typedef'\n", depth);
 		skip_until(";", "typedef");
 		next();
 	} else if (token == "auto" || token == "const" || token == "static" ||
 			token == "extern" || is_built_in_type()) { // start as type
+		log<3>("[DEBUG] =>(%d) init-statement\n", depth);
 		parse_init_statement();
 		next();
 	} else {
+		log<3>("[DEBUG] =>(%d) expression-statement\n", depth);
 		parse_expression();
+		log<3>("[DEBUG] =>(%d) expression-statement, parse_expression() return\n", depth);
 		expect_token(";", "statement");
 		next();
 	}
+	log<3>("[DEBUG] >(%d) %s return: (token = '%s')\n", depth, __FUNCTION__, token.c_str());
 }
 
 void parse_enum()
@@ -1085,7 +1141,7 @@ int show()
 				}
 			}
 			if (width > 25) {
-				log("\n%*s", (10 + 12 + 25), "");
+				log("\n%*s", (10 + 14 + 25), "");
 			} else {
 				log("%*s", 25 - width, "");
 			}
@@ -1109,9 +1165,15 @@ void print_vm_env(int ax, int ip, int sp, int bp)
 	}
 	log("\n");
 	for (size_t i = 0; i < 10 && bp != MEM_SIZE; ++i) {
-		log("\t[#%zd backtrace]: %08X\n", i, bp);
+		log("\t[#%zd backtrace]: bp = %08X", i, bp);
 		if (bp == m[bp]) break;
+		log("\tm[bp] = %08X", m[bp]);
+		log("\tm[bp+1] = %08X", m[bp+1]);
+		log("\tm[bp+2] = %08X", m[bp+2]);
+		log("\tm[bp+3] = %08X", m[bp+3]);
+		log("\tm[bp+4] = %08X", m[bp+4]);
 		bp = m[bp];
+		log("\n");
 	}
 	if (i == 10) {
 		log("...\n");
@@ -1252,32 +1314,38 @@ int run(int argc, const char** argv)
 		else if (i == SPUT) { m[m[sp++]] = ax;      } // put ax to [stack]
 		else if (i == XCHG) { swap(ax, m[sp++]);    } // swap ax and [stack]
 
-		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + a, and pop out
-		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - a, and pop out
-		else if (i == MUL ) { ax = m[sp++] * ax;    } // stack (top) * a, and pop out
-		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / a, and pop out
-		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % a, and pop out
+		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + ax, and pop out
+		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - ax, and pop out
+		else if (i == MUL ) { ax = m[sp++] * ax;    } // stack (top) * ax, and pop out
+		else if (i == DIV ) { ax = m[sp++] / ax;    } // stack (top) / ax, and pop out
+		else if (i == MOD ) { ax = m[sp++] % ax;    } // stack (top) % ax, and pop out
+		else if (i == NEG ) { ax = -ax;             }
+		else if (i == INC ) { ++ax;                 }
+		else if (i == DEC ) { --ax;                 }
 
-		else if (i == SHL ) { ax = m[sp++] >> ax;   } // stack (top) >> a, and pop out
-		else if (i == SHR ) { ax = m[sp++] << ax;   } // stack (top) << a, and pop out
-		else if (i == AND ) { ax = m[sp++] & ax;    } // stack (top) & a, and pop out
-		else if (i == OR  ) { ax = m[sp++] | ax;    } // stack (top) | a, and pop out
-		else if (i == NOT ) { ax = ~ax;             } // a = ~a
+		else if (i == SHL ) { ax = m[sp++] >> ax;   } // stack (top) >> ax, and pop out
+		else if (i == SHR ) { ax = m[sp++] << ax;   } // stack (top) << ax, and pop out
+		else if (i == AND ) { ax = m[sp++] & ax;    } // stack (top) & ax, and pop out
+		else if (i == OR  ) { ax = m[sp++] | ax;    } // stack (top) | ax, and pop out
+		else if (i == NOT ) { ax = ~ax;             }
 
-		else if (i == EQ  ) { ax = m[sp++] == ax;   } // stack (top) == a, and pop out
-		else if (i == NE  ) { ax = m[sp++] != ax;   } // stack (top) != a, and pop out
-		else if (i == GE  ) { ax = m[sp++] >= ax;   } // stack (top) >= a, and pop out
-		else if (i == GT  ) { ax = m[sp++] >  ax;   } // stack (top) >  a, and pop out
-		else if (i == LE  ) { ax = m[sp++] <= ax;   } // stack (top) <= a, and pop out
-		else if (i == LT  ) { ax = m[sp++] <  ax;   } // stack (top) <  a, and pop out
-		else if (i == LAND) { ax = m[sp++] && ax;   } // stack (top) && a, and pop out
-		else if (i == LOR ) { ax = m[sp++] || ax;   } // stack (top) || a, and pop out
-		else if (i == LNOT) { ax = !ax;             } // a = !a
+		else if (i == EQ  ) { ax = m[sp++] == ax;   } // stack (top) == ax, and pop out
+		else if (i == NE  ) { ax = m[sp++] != ax;   } // stack (top) != ax, and pop out
+		else if (i == GE  ) { ax = m[sp++] >= ax;   } // stack (top) >= ax, and pop out
+		else if (i == GT  ) { ax = m[sp++] >  ax;   } // stack (top) >  ax, and pop out
+		else if (i == LE  ) { ax = m[sp++] <= ax;   } // stack (top) <= ax, and pop out
+		else if (i == LT  ) { ax = m[sp++] <  ax;   } // stack (top) <  ax, and pop out
+		else if (i == LAND) { ax = m[sp++] && ax;   } // stack (top) && ax, and pop out
+		else if (i == LOR ) { ax = m[sp++] || ax;   } // stack (top) || ax, and pop out
+		else if (i == LNOT) { ax = !ax;             }
 
 		else if (i == ENTER) { m[--sp] = bp; bp = sp; sp -= m[ip++];   } // enter stack frame
 		else if (i == LEAVE) { sp = bp; bp = m[sp++];                  } // leave stack frame
 		else if (i == CALL ) { int n = m[ip++]; m[--sp] = ip; ip += n; } // call subroutine
 		else if (i == RET  ) { int n = m[ip]; ip = m[sp++]; sp += n;   } // exit subroutine
+		else if (i == JMP  ) { int n = m[ip++]; ip += n;               } // goto
+		else if (i == JZ   ) { int n = m[ip++]; if (!ax) ip += n;      } // goto if !ax
+		else if (i == JNZ  ) { int n = m[ip++]; if (ax) ip += n;       } // goto if ax
 
 		else { warn("unknown instruction: '%zd'\n", i); }
 
