@@ -39,7 +39,7 @@ vector<int> m(MEM_SIZE);
 enum machine_code {
 	EXIT,  PUSH,  POP,
 	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
-	SGET,  SPUT,  XCHG,
+	SGET,  SPUT,
 	ADD,   SUB,   MUL,  DIV, MOD,  NEG,  INC,  DEC,
 	SHL,   SHR,   AND,  OR,  NOT,
 	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,  LNOT,
@@ -50,7 +50,7 @@ enum machine_code {
 const char* machine_code_name =
 	"EXIT  PUSH  POP   "
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
-	"SGET  SPUT  XCHG  "
+	"SGET  SPUT  "
 	"ADD   SUB   MUL   DIV   MOD   NEG   INC   DEC   "
 	"SHL   SHR   AND   OR    NOT   "
 	"EQ    NE    GE    GT    LE    LT    LAND  LOR   LNOT  "
@@ -1440,7 +1440,6 @@ int run(int argc, const char** argv)
 
 		else if (i == SGET) { ax = m[m[sp++]];      } // get [stack] to ax
 		else if (i == SPUT) { m[m[sp++]] = ax;      } // put ax to [stack]
-		else if (i == XCHG) { swap(ax, m[sp++]);    } // swap ax and [stack]
 
 		else if (i == ADD ) { ax = m[sp++] + ax;    } // stack (top) + ax, and pop out
 		else if (i == SUB ) { ax = m[sp++] - ax;    } // stack (top) - ax, and pop out
