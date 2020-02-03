@@ -594,6 +594,23 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 	return make_tuple(is_global, offset, type_name, stype);
 }
 
+string build_code_for_op2(string a_type, string op_name, string b_type)
+{
+	if      (op_name == "+=" ) add_assembly_code(ADD);
+	else if (op_name == "-=" ) add_assembly_code(SUB);
+	else if (op_name == "*=" ) add_assembly_code(MUL);
+	else if (op_name == "/=" ) add_assembly_code(DIV);
+	else if (op_name == "%=" ) add_assembly_code(MOD);
+	else if (op_name == "<<=") add_assembly_code(SHL);
+	else if (op_name == ">>=") add_assembly_code(SHR);
+	else if (op_name == "&=" ) add_assembly_code(AND);
+	else if (op_name == "|=" ) add_assembly_code(OR);
+	else if (op_name == "&&=") add_assembly_code(LAND);
+	else if (op_name == "||=") add_assembly_code(LOR);
+	else print_error("Unsupported operator '%s'\n", op_name.c_str());
+	return "int";
+}
+
 string build_code_for_op(string a_type, string op_name, string b_type)
 {
 	if (a_type == "int" && b_type == "int") {
@@ -745,9 +762,46 @@ string parse_expression(string stop_token, int depth)
 			parse_expression(",", depth + 1);
 			add_assembly_code(SPUT, offset, name + "\t" + type_name);
 			type_name = symbol_type_name;
-		} else if (token == "++" || token == "--") { // suffix/postfix
-			// TODO: ++ / --
+		} else if (token == "+=" || token == "-=" || token == "*=" || token == "/=" || token == "%=" ||
+				token == "<<=" || token == ">>=" || token == "&=" || token == "|=" || token == "&&=" || token == "||=") {
+			string op_name = token;
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (is_global) {
+				add_assembly_code(LEA, offset, name + "\t" + type_name);
+			} else {
+				add_assembly_code(LLEA, offset, name + "\t" + type_name);
+			}
+			add_assembly_code(PUSH);
 			next();
+			string b_type = parse_expression(",", depth + 1);
+			add_assembly_code(SPUT, offset, name + "\t" + type_name);
+			type_name = build_code_for_op2(symbol_type_name, op_name, b_type);
+			if (is_global) {
+				add_assembly_code(PUT, offset, name + "\t" + type_name);
+			} else {
+				add_assembly_code(LPUT, offset, name + "\t" + type_name);
+			}
+		} else if (token == "++" || token == "--") { // suffix/postfix
+			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			if (is_global) {
+				add_assembly_code(GET, offset, name + "\t" + type_name);
+			} else {
+				add_assembly_code(LGET, offset, name + "\t" + type_name);
+			}
+			add_assembly_code(PUSH);
+			if (token == "++") {
+				add_assembly_code(INC);
+			} else {
+				add_assembly_code(DEC);
+			}
+			if (is_global) {
+				add_assembly_code(PUT, offset, name + "\t" + type_name);
+			} else {
+				add_assembly_code(LPUT, offset, name + "\t" + type_name);
+			}
+			add_assembly_code(POP);
+			next();
+			type_name = symbol_type_name;
 		} else if (token == "{") {
 			// TODO: initializer
 			skip_until("}", "");
@@ -925,16 +979,22 @@ void parse_statements(int depth = 0)
 	} else if (token == "while") {
 		log<3>("[DEBUG] =>(%d) statement 'while'\n", depth);
 		next(); expect_token("(", "while");
+		size_t code_offset_1 = code_sec.size();
 		next(); parse_expression(); expect_token(")", "while");
+		size_t code_offset_2 = add_assembly_code(JZ, code_sec.size() + 2);
 		next(); parse_statements(depth + 1);
+		add_assembly_code(JMP, code_offset_1);
+		update_relative_address_here(code_offset_2);
 	} else if (token == "do") {
 		log<3>("[DEBUG] =>(%d) statement 'do'\n", depth);
 		next(); expect_token("{", "do");
+		size_t code_offset_1 = code_sec.size();
 		parse_statements(depth + 1);
 		expect_token("while", "do");
 		next(); expect_token("(", "do");
 		next(); parse_expression();
-		next(); expect_token(")", "do");
+		add_assembly_code(JNZ, code_offset_1);
+		expect_token(")", "do");
 		next(); expect_token(";", "do");
 	} else if (token == "return") {
 		log<3>("[DEBUG] =>(%d) statement 'return'\n", depth);
