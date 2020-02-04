@@ -152,6 +152,25 @@ size_t ext_symbol_counter = 0;
 size_t next_display_source_code = 0;
 size_t next_display_machine_code = 0;
 
+unordered_map<string, unordered_map<string, int>> enum_values; // enum-name => { name => value }
+unordered_map<string, pair<string, int>> enum_types; // name => { enum-name, value }
+
+void dump_enum()
+{
+	for (auto it = enum_values.begin(); it != enum_values.end(); ++it) {
+		log("[DEBUG] enum '%s': [ ", it->first.c_str());
+		size_t i = 0;
+		for (auto e : it->second) {
+			log("%s%s = %d", (++i == 1 ? "" : ", "), e.first.c_str(), e.second);
+		}
+		log(" ]\n");
+	}
+	for (auto it = enum_types.begin(); it != enum_types.end(); ++it) {
+		log("[DEBUG] '%s' => [ '%s', %d ]\n", it->first.c_str(),
+				it->second.first.c_str(), it->second.second);
+	}
+}
+
 //--------------------------------------------------------//
 
 void print_source_code_line(size_t n)
@@ -855,24 +874,31 @@ string parse_expression(string stop_token, int depth)
 			// TODO: find member
 			next();
 		} else {
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
-			if (is_global) {
-				if (symbol_type_name == "int") {
-					add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
-				} else {
-					add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
-				}
+			auto it = enum_types.find(name);
+			if (it != enum_types.end()) {
+				int value = it->second.second;
+				add_assembly_code(MOV, value);
+				type_name = "int";
 			} else {
-				if (symbol_type_name == "int") {
-					add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+				auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+				if (is_global) {
+					if (symbol_type_name == "int") {
+						add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
+					} else {
+						add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
+					}
 				} else {
-					add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
+					if (symbol_type_name == "int") {
+						add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+					} else {
+						add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
+					}
 				}
-			}
-			if (stype == code_symbol) {
-				type_name = "(*)(" + symbol_type_name + ")";
-			} else {
-				type_name = symbol_type_name;
+				if (stype == code_symbol) {
+					type_name = "(*)(" + symbol_type_name + ")";
+				} else {
+					type_name = symbol_type_name;
+				}
 			}
 		}
 	}
@@ -1062,6 +1088,7 @@ void parse_enum()
 	expect_token("{", "enum " + name);
 	next(); // skip '{'
 
+	int value = 0;
 	while (!token.empty() && token != "}") {
 		if (type != symbol) {
 			print_error("invalid token '%s' for 'enum' value!\n", token.c_str());
@@ -1069,17 +1096,35 @@ void parse_enum()
 		string enum_key = token;
 		next(); // skip
 
-		string value;
+		string value_txt;
 		if (token == "=") {
 			next(); // skip '='
 			if (type != symbol && type != number) {
 				print_error("invalid token '%s' for 'enum' declearation!\n", token.c_str());
 			}
-			value = token;
+			value_txt = token;
+			value = eval_number(value_txt);
 			next();
 		}
-		log<3>("[DEBUG] enum %s: %s%s%s\n", name.c_str(), enum_key.c_str(),
-				(value.empty() ? "" : " = "), value.c_str());
+		log<3>("[DEBUG] enum '%s': %s%s%s\n", name.c_str(), enum_key.c_str(),
+				(value_txt.empty() ? "" : " = "), value_txt.c_str());
+
+		auto it = enum_values.find(name);
+		if (it == enum_values.end()) {
+			enum_values.insert(make_pair(name, unordered_map<string, int>()));
+			it = enum_values.find(name);
+		}
+		auto it2 = it->second.find(enum_key);
+		if (it2 != it->second.end()) {
+			print_error("duplidated enum key '%s'!\n", enum_key.c_str());
+		}
+		it->second.insert(make_pair(enum_key, value++));
+		auto it3 = enum_types.find(enum_key);
+		if (it3 != enum_types.end()) {
+			print_error("symbol '%s' has existed!\n", enum_key.c_str());
+		}
+		enum_types.insert(make_pair(enum_key, make_pair(name, value)));
+
 		if (token == "}") break;
 		expect_token(",", "enum " + name);
 		next();
@@ -1089,6 +1134,7 @@ void parse_enum()
 	expect_token(";", "enum " + name);
 	next(); // skip ';'
 	log<3>("[DEBUG] end of enum %s\n", name.c_str());
+	if (verbose >= 4) dump_enum();
 }
 
 bool load(string filename)
