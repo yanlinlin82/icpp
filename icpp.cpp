@@ -37,7 +37,7 @@ const int MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
 vector<int> m(MEM_SIZE);
 
 enum machine_code {
-	EXIT,  PUSH,  POP,
+	EXIT,  PUSH,  POP,  ADJ,
 	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
 	SGET,  SPUT,
 	ADD,   SUB,   MUL,  DIV, MOD,  NEG,  INC,  DEC,
@@ -48,7 +48,7 @@ enum machine_code {
 };
 
 const char* machine_code_name =
-	"EXIT  PUSH  POP   "
+	"EXIT  PUSH  POP   ADJ   "
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
 	"SGET  SPUT  "
 	"ADD   SUB   MUL   DIV   MOD   NEG   INC   DEC   "
@@ -58,7 +58,7 @@ const char* machine_code_name =
 
 inline bool machine_code_has_parameter(int code)
 {
-	return (code == MOV ||
+	return (code == MOV || code == ADJ ||
 			code == LEA || code == GET || code == PUT ||
 			code == LLEA || code == LGET || code == LPUT ||
 			code == ENTER || code == CALL || code == RET ||
@@ -318,16 +318,24 @@ void update_relative_address_here(size_t instrument_offset)
 
 void add_external_symbol(string name, string args_type, string ret_type = "", int arg_count = 0)
 {
+	// for variable arguments, arg_count is negative, and the number is fixed arguments.
+	// for example
+	//   `int printf(const char* fmt, ...)`, arg_count is -1
+	//   `int fprintf(FILE*, const char* fmt, ...)`, arg_count is -2
+	// in runtime, an integer is appended after variable arguments, specifying their numbers.
+	//   the number, as in stdcall calling convention (which means the arguments are pushed into
+	//   stack as the order in source code, and this interpreter follows this rule), could be
+	//   found as [bp + 1] in subroutine (before ENTER)
 	if (ret_type.empty()) { // data
 		size_t offset = data_sec.size();
 		add_symbol(name, data_symbol, offset, 1, args_type, "", 0);
 		data_sec.resize(offset + 1);
 	} else { // code
 		size_t offset = code_sec.size();
-		string name2 = name + "(" + args_type + ")";
-		override_functions[name].insert(name2);
-		add_symbol(name2, code_symbol, offset, 2, args_type, ret_type, arg_count);
-		add_assembly_code(RET, arg_count, ret_type + " " + name2);
+		string name_with_args = name + "(" + args_type + ")";
+		override_functions[name].insert(name_with_args);
+		add_symbol(name_with_args, code_symbol, offset, 2, args_type, ret_type, arg_count);
+		add_assembly_code(RET, (arg_count >= 0 ? arg_count : 0), ret_type + " " + name_with_args);
 	}
 }
 
@@ -524,21 +532,27 @@ string parse_type_name()
 	return type_name;
 }
 
-auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, string, symbol_type> // offset, arg_types, stype
+auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, string, symbol_type, string, int> // offset, arg_types, stype, type_name, arg_count
 {
 	auto it = override_functions.find(name);
 	if (it == override_functions.end()) {
 		print_error("function '%s' not defined!\n", name.c_str());
 	}
-	string type_name = vector_to_string(arg_types);
+	string type_name;
+	if (name == "printf") {
+		if (arg_types.empty()) print_error("missing parameter in printf()!\n");
+		type_name = arg_types[0] + ",...";
+	} else {
+		type_name = vector_to_string(arg_types);
+	}
 	for (auto it2 = it->second.begin(); it2 != it->second.end(); ++it2) {
 		if (*it2 == name + "(" + type_name + ")") {
 			auto it3 = symbols.find(*it2);
 			if (it3 == symbols.end()) {
 				print_error("unexpected runtime error!\n");
 			}
-			auto [ stype, offset, size, type_name, ret_type, arg_count ] = it3->second;
-			return make_tuple(offset, ret_type, stype);
+			auto [ stype, offset, size, symbol_type_name, ret_type, arg_count ] = it3->second;
+			return make_tuple(offset, ret_type, stype, type_name, arg_count);
 		}
 	}
 	print_error("function '%s' not matched!\n", name.c_str());
@@ -667,9 +681,15 @@ string parse_function(string name)
 	}
 	expect_token(")", "function '" + name + "'");
 	log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
-	auto [ offset, ret_type, stype ] = query_function(name, arg_types);
-	string type_name = vector_to_string(arg_types);
+	auto [ offset, ret_type, stype, type_name, arg_count ] = query_function(name, arg_types);
+	if (arg_count < 0) {
+		add_assembly_code(MOV, arg_types.size() + arg_count);
+		add_assembly_code(PUSH);
+	}
 	add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
+	if (arg_count < 0) {
+		add_assembly_code(ADJ, arg_types.size());
+	}
 	log<3>("[DEBUG] ret_type = '%s'\n", ret_type.c_str());
 	next();
 	return ret_type;
@@ -1092,10 +1112,11 @@ void init_symbol()
 	add_external_symbol("cout", "ostream");
 	add_external_symbol("cerr", "ostream");
 	add_external_symbol("endl", "endl_t", "void", 1);
-	add_external_symbol("operator<<", "ostream,int",         "ostream", 2);
-	add_external_symbol("operator<<", "ostream,double",      "ostream", 2);
+	add_external_symbol("operator<<", "ostream,int", "ostream", 2);
+	add_external_symbol("operator<<", "ostream,double", "ostream", 2);
 	add_external_symbol("operator<<", "ostream,const char*", "ostream", 2);
 	add_external_symbol("operator<<", "ostream,(*)(endl_t)", "ostream", 2);
+	add_external_symbol("printf", "const char*,...", "int", -1);
 	log<3>("[DEBUG] total %zd symbols are prepared\n", symbols.size());
 	external_data_size = data_sec.size();
 	external_code_size = code_sec.size();
@@ -1194,7 +1215,7 @@ int show()
 			string data_type = "word";
 			if (type == "const char*") data_type = "byte";
 			log(COLOR_YELLOW "%-10zd", i);
-			log(COLOR_BLUE ".%-11s", data_type.c_str());
+			log(COLOR_BLUE ".%-13s", data_type.c_str());
 			size_t width = 0;
 			if (type == "const char*") {
 				log("\""); ++width;
@@ -1317,6 +1338,30 @@ int call_ext(const string& name, int sp)
 			exit(1);
 		}
 		return a;
+	} else if (name == "printf(const char*,...)") {
+		int var_arg_count = m[sp + 1];
+		int var_arg_start = sp + 1 + var_arg_count;
+		const char* fmt = reinterpret_cast<const char*>(&m[m[var_arg_start + 1]]);
+		int n = 0;
+		for (int i = 0; *fmt; ++fmt) {
+			if (*fmt == '%') {
+				char c = *++fmt;
+				if (c == 'd' || c == 'c') {
+					if (i >= var_arg_count) { n += printf("<missing>"); }
+					else { n += printf((c == 'd' ? "%d" : "%c"), m[var_arg_start - i]); }
+					++i;
+				} else if (c == 's' || c == 'p') {
+					if (i >= var_arg_count) { n += printf("<missing>"); }
+					else { n += printf((c == 's' ? "%s" : "%p"), reinterpret_cast<const char*>(&m[m[var_arg_start - i]])); }
+					++i;
+				} else {
+					n += printf("%c", c);
+				}
+			} else {
+				n += printf("%c", *fmt);
+			}
+		}
+		return n;
 	} else {
 		err("Unsupported function '%s'\n", name.c_str());
 		exit(1);
@@ -1423,6 +1468,7 @@ int run(int argc, const char** argv)
 		if      (i == EXIT) { break;                } // exit the program
 		else if (i == PUSH) { m[--sp] = ax;         } // push ax to stack
 		else if (i == POP ) { ax = m[sp++];         } // pop ax from stack
+		else if (i == ADJ ) { sp -= m[ip++];        } // adjust stack pointer
 
 		else if (i == MOV ) { ax = m[ip++];         } // move immediate to ax
 		else if (i == LEA ) { ax = m[ip++];         } // load address to ax
