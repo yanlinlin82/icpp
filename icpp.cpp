@@ -916,9 +916,8 @@ string parse_expression(string stop_token, int depth)
 	return type_name;
 }
 
-void parse_init_statement()
+void parse_declare()
 {
-	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
 	string type_name = parse_type_name();
 	string type_prefix = type_name;
 	string name = token; next();
@@ -979,6 +978,19 @@ void parse_init_statement()
 			log<3>("[DEBUG] => another variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		}
 		expect_token(";", "variable");
+	}
+}
+
+void parse_init_statement()
+{
+	log<3>("[DEBUG] > %s:\n", __FUNCTION__);
+
+	if (token == "auto" || token == "const" || token == "static" ||
+				token == "extern" || is_built_in_type()) { // start as type
+		parse_declare();
+	} else {
+		parse_expression();
+		expect_token(";", "statement");
 	}
 }
 
@@ -1060,16 +1072,9 @@ void parse_statements(int depth = 0)
 		log<3>("[DEBUG] =>(%d) statement 'typedef'\n", depth);
 		skip_until(";", "typedef");
 		next();
-	} else if (token == "auto" || token == "const" || token == "static" ||
-			token == "extern" || is_built_in_type()) { // start as type
+	} else {
 		log<3>("[DEBUG] =>(%d) init-statement\n", depth);
 		parse_init_statement();
-		next();
-	} else {
-		log<3>("[DEBUG] =>(%d) expression-statement\n", depth);
-		parse_expression();
-		log<3>("[DEBUG] =>(%d) expression-statement, parse_expression() return\n", depth);
-		expect_token(";", "statement");
 		next();
 	}
 	log<3>("[DEBUG] >(%d) %s return: (token = '%s')\n", depth, __FUNCTION__, token.c_str());
