@@ -19,16 +19,14 @@ using namespace std;
 #define COLOR_YELLOW "\x1B[33m"
 #define COLOR_BLUE   "\x1B[34m"
 
-int verbose = 0;
+static int verbose = 0;
+static void (*on_err)() = nullptr;
 
 template <int level = 0> inline int log(const char* fmt, va_list ap) { return (verbose < level) ? 0 : vfprintf(stderr, fmt, ap); }
 template <int level = 0> inline int log(const char* fmt, ...) { va_list ap; va_start(ap, fmt); return log<level>(fmt, ap); }
 
-inline void err(const char* fmt, va_list ap) { log(COLOR_RED "Error: "); log(fmt, ap); log(COLOR_NORMAL); }
-inline void err(const char* fmt, ...) { va_list ap; va_start(ap, fmt); err(fmt, ap); }
-
-inline void warn(const char* fmt, va_list ap) { log(COLOR_YELLOW "Warning: "); log(fmt, ap); log(COLOR_NORMAL); }
-inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); warn(fmt, ap); }
+inline void err(const char* fmt, ...) { va_list ap; va_start(ap, fmt); log(COLOR_RED "Error: "); log(fmt, ap); log(COLOR_NORMAL); if (on_err) on_err(); }
+inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); log(COLOR_YELLOW "Warning: "); log(fmt, ap); log(COLOR_NORMAL); }
 
 //--------------------------------------------------------//
 // machine code definition
@@ -199,9 +197,8 @@ void print_current(bool with_source_code = true)
 	log("--(token='%s',type='%s')\n", token.c_str(), token_type_text[type]);
 }
 
-void print_error(const char* fmt, ...)
+void print_current_and_exit()
 {
-	va_list ap; va_start(ap, fmt); err(fmt, ap);
 	print_current();
 	exit(1);
 }
@@ -214,7 +211,7 @@ void add_symbol(string name, symbol_type stype,
 			offset, size, type.c_str(), ret_type.c_str(), arg_count);
 	symbols[name] = make_tuple(stype, offset, size, type, ret_type, arg_count);
 	if (offset_to_symbol[stype].find(offset) != offset_to_symbol[stype].end()) {
-		print_error("offset %zd has already existsed! existed '%s', now adding '%s'\n",
+		err("offset %zd has already existsed! existed '%s', now adding '%s'\n",
 				offset, offset_to_symbol[stype][offset].c_str(), name.c_str());
 	}
 	offset_to_symbol[stype][offset] = name;
@@ -424,7 +421,7 @@ end:
 void expect_token(string expected_token, string statement)
 {
 	if (token != expected_token) {
-		print_error("missing '%s' for '%s'! current token: '%s'\n",
+		err("missing '%s' for '%s'! current token: '%s'\n",
 				expected_token.c_str(), statement.c_str(), token.c_str());
 	}
 }
@@ -444,7 +441,7 @@ int precedence(string token)
 {
 	auto it = operator_precedence.find(token);
 	if (it == operator_precedence.end()) {
-		print_error("unknown operator '%s'!\n", token.c_str());
+		err("unknown operator '%s'!\n", token.c_str());
 	}
 	return it->second;
 }
@@ -470,10 +467,10 @@ int eval_number(string s) // TODO: support long long and float/double
 	for (; *p; ++p) {
 		if (*p == '.') break;
 		if (!((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'F') || (*p >= 'a' && *p <= 'f'))) {
-			print_error("unexpected character '%c' in number '%s'!", *p, s.c_str());
+			err("unexpected character '%c' in number '%s'!", *p, s.c_str());
 		}
 		int x = *p - (*p >= 'a' ? ('a' - 10) : (*p >= 'A' ? ('A' - 10) : '0'));
-		if (x >= base) print_error("Invalid number '%s'!", s.c_str());
+		if (x >= base) err("Invalid number '%s'!", s.c_str());
 		n = n * base + x;
 	}
 	return (minus ? -n : n);
@@ -530,11 +527,11 @@ string parse_type_name()
 				a.push_back(make_pair(type, token));
 				next();
 			} else if (token == ">") {
-				if (--angle_bracket < 0) { print_error("unexpected '>'!\n"); }
+				if (--angle_bracket < 0) { err("unexpected '>'!\n"); }
 				a.push_back(make_pair(type, token));
 				next();
 			} else if (token == ">>") {
-				if (angle_bracket < 2) { print_error("unexpected '>>'!\n"); }
+				if (angle_bracket < 2) { err("unexpected '>>'!\n"); }
 				angle_bracket -= 2;
 				a.push_back(make_pair(type, ">"));
 				a.push_back(make_pair(type, ">"));
@@ -563,11 +560,11 @@ auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, str
 {
 	auto it = override_functions.find(name);
 	if (it == override_functions.end()) {
-		print_error("function '%s' not defined!\n", name.c_str());
+		err("function '%s' not defined!\n", name.c_str());
 	}
 	string type_name;
 	if (name == "printf") {
-		if (arg_types.empty()) print_error("missing parameter in printf()!\n");
+		if (arg_types.empty()) err("missing parameter in printf()!\n");
 		type_name = arg_types[0] + ",...";
 	} else {
 		type_name = vector_to_string(arg_types);
@@ -576,13 +573,13 @@ auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, str
 		if (*it2 == name + "(" + type_name + ")") {
 			auto it3 = symbols.find(*it2);
 			if (it3 == symbols.end()) {
-				print_error("unexpected runtime error!\n");
+				err("unexpected runtime error!\n");
 			}
 			auto [ stype, offset, size, symbol_type_name, ret_type, arg_count ] = it3->second;
 			return make_tuple(offset, ret_type, stype, type_name, arg_count);
 		}
 	}
-	print_error("function '%s' not matched!\n", name.c_str());
+	err("function '%s' not matched!\n", name.c_str());
 	exit(1);
 }
 
@@ -613,14 +610,14 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 		if (it == symbols.end()) {
 			auto it2 = override_functions.find(s);
 			if (it2 == override_functions.end() || it2->second.empty()) {
-				print_error("unknown symbol '%s'!\n", s.c_str());
+				err("unknown symbol '%s'!\n", s.c_str());
 			}
 			if (it2->second.size() > 1) {
-				print_error("undetermined override symbol '%s'!\n", s.c_str());
+				err("undetermined override symbol '%s'!\n", s.c_str());
 			}
 			it = symbols.find(*(it2->second.begin()));
 			if (it == symbols.end()) {
-				print_error("unknown symbol '%s'!\n", s.c_str());
+				err("unknown symbol '%s'!\n", s.c_str());
 			}
 		}
 		auto [ stype_2, offset_2, size, t, ret_type, arg_count ] = it->second;
@@ -647,7 +644,7 @@ string build_code_for_op2(string a_type, string op_name, string b_type)
 	else if (op_name == "|=" ) add_assembly_code(OR);
 	else if (op_name == "&&=") add_assembly_code(LAND);
 	else if (op_name == "||=") add_assembly_code(LOR);
-	else print_error("Unsupported operator '%s'\n", op_name.c_str());
+	else err("Unsupported operator '%s'\n", op_name.c_str());
 	return "int";
 }
 
@@ -671,17 +668,17 @@ string build_code_for_op(string a_type, string op_name, string b_type)
 		else if (op_name == "<" ) add_assembly_code(LT);
 		else if (op_name == "&&") add_assembly_code(LAND);
 		else if (op_name == "||") add_assembly_code(LOR);
-		else print_error("Unsupported operator '%s'\n", op_name.c_str());
+		else err("Unsupported operator '%s'\n", op_name.c_str());
 		return "int";
 	} else {
 		string name = "operator" + op_name + "(" + a_type + "," + b_type + ")";
 		auto it = symbols.find(name);
 		if (it == symbols.end()) {
-			print_error("Unknown function '%s'\n", name.c_str());
+			err("Unknown function '%s'\n", name.c_str());
 		}
 		auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
 		if (stype != code_symbol && stype != ext_symbol) {
-			print_error("symbol '%s' is not a function!\n", name.c_str());
+			err("symbol '%s' is not a function!\n", name.c_str());
 		}
 		add_assembly_code(PUSH);
 		add_assembly_code(CALL, offset, ret_type + " " + name);
@@ -751,7 +748,7 @@ string parse_pointer_derefer(string name, string symbol_type_name,
 		next();
 		parse_expression(";", depth, generate_code);
 		if (type_name.substr(type_name.size() - 1) != "*") {
-			print_error("too many level of dereferencing on a pointer!\n");
+			err("too many level of dereferencing on a pointer!\n");
 		}
 		type_name = type_name.substr(0, type_name.size() - 1);
 		int element_size = get_type_size(type_name);
@@ -776,7 +773,7 @@ string parse_array_element(string name, string symbol_type_name,
 	assert(symbol_type_name.substr(symbol_type_name.size() - 1) == "]");
 	auto it = symbol_dim.find(name);
 	if (it == symbol_dim.end()) {
-		print_error("symbol '%s' (type = '%s') is not an array!\n",
+		err("symbol '%s' (type = '%s') is not an array!\n",
 				name.c_str(), symbol_type_name.c_str());
 	}
 	const auto& dim = it->second.second;
@@ -867,10 +864,10 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 		string op_name = token;
 		next();
 		if (op_name == "++" || op_name == "--") {
-			if (type != symbol) print_error("unexpected token ('%s') after '%s'!\n", token.c_str(), op_name.c_str());
+			if (type != symbol) err("unexpected token ('%s') after '%s'!\n", token.c_str(), op_name.c_str());
 			string name = token;
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
-			if (symbol_type_name != "int") print_error("Operator '++' and '--' supports only 'int'!\n");
+			if (symbol_type_name != "int") err("Operator '++' and '--' supports only 'int'!\n");
 			if (is_global) {
 				if (generate_code) add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
 			} else {
@@ -896,7 +893,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 		next();
 		while (token == "::") {
 			name += token; next();
-			if (type != symbol) { print_error("unexpected token after '::'!\n"); }
+			if (type != symbol) { err("unexpected token after '::'!\n"); }
 			name += token; next();
 		}
 		if (token == "(") {
@@ -1019,14 +1016,14 @@ void parse_init_value(vector<int>& dim, vector<int>& dim2, vector<int>& cursor,
 		vector<pair<vector<int>, int>>& init)
 {
 	if (token == "{") {
-		if (cursor.size() >= dim.size()) print_error("too many level in init val!\n");
+		if (cursor.size() >= dim.size()) err("too many level in init val!\n");
 		next();
 		size_t i = cursor.size();
 		for (cursor.push_back(0); ; ++cursor[i]) {
 			if (dim[i] == 0) {
 				if (cursor[i] >= dim2[i]) dim2[i] = cursor[i] + 1;
 			} else {
-				if (cursor[i] >= dim[i]) print_error("array init overflow!\n");
+				if (cursor[i] >= dim[i]) err("array init overflow!\n");
 			}
 			parse_init_value(dim, dim2, cursor, init);
 			if (token == "}") break;
@@ -1052,7 +1049,7 @@ void parse_declare()
 	if (token == "(") { // function
 		log<3>("[DEBUG] => function '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		if (!scopes.empty() && scopes.back().first != "function") {
-			print_error("nesting function is not allowed!\n");
+			err("nesting function is not allowed!\n");
 		}
 		next();
 		vector<pair<string, string>> args; // [ { type, name } ]
@@ -1090,9 +1087,9 @@ void parse_declare()
 				for (;;) {
 					int size = 0; // size undetermined
 					if (token != "]") {
-						if (type != number) print_error("invalid array size '%s'! it should be a number.\n", token.c_str());
+						if (type != number) err("invalid array size '%s'! it should be a number.\n", token.c_str());
 						size = eval_number(token);
-						if (size <= 0) print_error("invalid array size '%s'! it should be a positive integer!\n", token.c_str());
+						if (size <= 0) err("invalid array size '%s'! it should be a positive integer!\n", token.c_str());
 						next();
 						expect_token("]", "array");
 						next();
@@ -1105,7 +1102,7 @@ void parse_declare()
 				if (verbose >= 3) {
 					log("array dim = ["); for (size_t i = 0; i < dim.size(); ++i) log("%s%d", (i > 0 ? "," : ""), dim[i]); log("]\n");
 				}
-				if (!size && token != "=") print_error("missing array size!\n");
+				if (!size && token != "=") err("missing array size!\n");
 				if (token == "=") {
 					next();
 					vector<int> dim2 = dim;
@@ -1260,7 +1257,7 @@ void parse_statements(int depth = 0)
 		log<3>("[DEBUG] =>(%d) statement 'return'\n", depth);
 		next();
 		if (scopes.empty() || scopes.back().first != "function") {
-			print_error("unexpected 'return' statement!\n");
+			err("unexpected 'return' statement!\n");
 		}
 		string name = scopes.back().second;
 		if (token != ";") {
@@ -1288,7 +1285,7 @@ void parse_enum()
 	next(); // skip 'enum'
 
 	if (type != symbol) {
-		print_error("missing symbol for 'enum' name!\n");
+		err("missing symbol for 'enum' name!\n");
 	}
 	string name = token;
 	next(); // skip name
@@ -1299,7 +1296,7 @@ void parse_enum()
 	int value = 0;
 	while (!token.empty() && token != "}") {
 		if (type != symbol) {
-			print_error("invalid token '%s' for 'enum' value!\n", token.c_str());
+			err("invalid token '%s' for 'enum' value!\n", token.c_str());
 		}
 		string enum_key = token;
 		next(); // skip
@@ -1308,7 +1305,7 @@ void parse_enum()
 		if (token == "=") {
 			next(); // skip '='
 			if (type != symbol && type != number) {
-				print_error("invalid token '%s' for 'enum' declearation!\n", token.c_str());
+				err("invalid token '%s' for 'enum' declearation!\n", token.c_str());
 			}
 			value_txt = token;
 			value = eval_number(value_txt);
@@ -1324,12 +1321,12 @@ void parse_enum()
 		}
 		auto it2 = it->second.find(enum_key);
 		if (it2 != it->second.end()) {
-			print_error("duplidated enum key '%s'!\n", enum_key.c_str());
+			err("duplidated enum key '%s'!\n", enum_key.c_str());
 		}
 		it->second.insert(make_pair(enum_key, value++));
 		auto it3 = enum_types.find(enum_key);
 		if (it3 != enum_types.end()) {
-			print_error("symbol '%s' has existed!\n", enum_key.c_str());
+			err("symbol '%s' has existed!\n", enum_key.c_str());
 		}
 		enum_types.insert(make_pair(enum_key, make_pair(name, value)));
 
@@ -1392,7 +1389,7 @@ void parse()
 	for (next(); !token.empty();) {
 		if (token == "using") {
 			next(); while (!token.empty() && token != ";") next();
-			if (token.empty()) { print_error("missing ';' for 'using'!\n"); }
+			if (token.empty()) { err("missing ';' for 'using'!\n"); }
 			log<3>("[DEBUG] => 'using' statement skipped\n");
 			next();
 		} else if (token == "typedef") {
@@ -1797,6 +1794,7 @@ int main(int argc, const char** argv)
 		log("usage: icpp [-s] [-v] <foo.cpp> ...\n");
 		return false;
 	}
+	on_err = print_current_and_exit;
 	if (load(filename)) parse();
 	return assembly ? show() : run(argc, argv);
 }
