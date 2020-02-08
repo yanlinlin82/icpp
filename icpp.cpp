@@ -143,6 +143,8 @@ unordered_map<string, tuple<symbol_type, size_t, size_t, string, string, int>> s
 unordered_map<size_t, string> offset_to_symbol[3];
 unordered_map<string, unordered_set<string>> override_functions;
 
+unordered_map<string, pair<int, vector<int>>> symbol_dim; // name => [ size, dim ]
+
 unordered_map<size_t, pair<size_t, size_t>> offset; // line_no => [ offset_start, offset_end ]
 
 tuple<string, string, string, int> current_function; // name, arg_types, ret_type, arg_count
@@ -226,20 +228,26 @@ size_t add_const_string(string name, vector<int> val, string type)
 	return offset;
 }
 
-auto add_variable(string name, vector<int> val, string type) -> pair<bool, size_t> // { is-global, offset }
+bool is_global_variable()
 {
-	log<3>("[DEBUG] add variable '%s', type = '%s'\n", name.c_str(), type.c_str());
+	return stack_frame_table.empty();
+}
+
+auto add_variable(string name, int size, string type) -> pair<bool, size_t> // { is-global, offset }
+{
+	log<3>("[DEBUG] add variable '%s', size = %d, type = '%s'\n",
+			name.c_str(), size, type.c_str());
 	if (stack_frame_table.empty()) {
 		size_t offset = data_sec.size();
-		add_symbol(name, data_symbol, offset, val.size(), type, "", 0);
-		data_sec.insert(data_sec.end(), val.begin(), val.end());
+		add_symbol(name, data_symbol, offset, size, type, "", 0);
+		data_sec.resize(data_sec.size() + size);
 		return make_pair(true, offset);
 	} else {
 		size_t stack_frame_offset = stack_frame_table.back().first;
-		size_t symbol_offset = code_sec[stack_frame_offset] + 1;
-		code_sec[stack_frame_offset] += val.size();
-		stack_frame_table.back().second.insert(make_pair(name, make_tuple(-symbol_offset, val.size(), type)));
-		return make_pair(false, -symbol_offset);
+		code_sec[stack_frame_offset] += size;
+		size_t symbol_offset = -code_sec[stack_frame_offset];
+		stack_frame_table.back().second.insert(make_pair(name, make_tuple(symbol_offset, size, type)));
+		return make_pair(false, symbol_offset);
 	}
 }
 
@@ -681,7 +689,7 @@ string build_code_for_op(string a_type, string op_name, string b_type)
 	}
 }
 
-string parse_expression(string stop_token = ";", int depth = 0);
+string parse_expression(string stop_token = ";", int depth = 0, bool generate_code = true);
 
 string parse_function(string name)
 {
@@ -702,7 +710,7 @@ string parse_function(string name)
 	log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
 	auto [ offset, ret_type, stype, type_name, arg_count ] = query_function(name, arg_types);
 	if (arg_count < 0) {
-		add_assembly_code(MOV, arg_types.size() + arg_count);
+		add_assembly_code(MOV, arg_types.size() + arg_count, "variable parameter count");
 		add_assembly_code(PUSH);
 	}
 	add_assembly_code(CALL, offset, ret_type + " " + name + "(" + type_name + ")");
@@ -714,14 +722,119 @@ string parse_function(string name)
 	return ret_type;
 }
 
-string parse_expression(string stop_token, int depth)
+string array_suffix(const vector<int>& dim)
+{
+	string s; for (auto e : dim) s += "[" + to_string(e) + "]"; return s;
+}
+
+int get_type_size(string type_name)
+{
+	if (type_name.substr(type_name.size() - 1) == "*") { // pointer
+		return sizeof(int); // we use 'int' as word size
+	} else {
+		return sizeof(int); // we use 'int' as default type
+	}
+}
+
+string parse_pointer_derefer(string name, string symbol_type_name,
+		int offset, bool is_global, bool generate_code, int depth)
+{
+	assert(symbol_type_name.substr(symbol_type_name.size() - 1) == "*");
+	string type_name = symbol_type_name;
+	if (is_global) {
+		if (generate_code) add_assembly_code(GET, offset, name + "\t" + type_name);
+	} else {
+		if (generate_code) add_assembly_code(LGET, offset, name + "\t" + type_name);
+	}
+	for (size_t i = 0; ; ++i) {
+		if (generate_code) add_assembly_code(PUSH);
+		next();
+		parse_expression(";", depth, generate_code);
+		if (type_name.substr(type_name.size() - 1) != "*") {
+			print_error("too many level of dereferencing on a pointer!\n");
+		}
+		type_name = type_name.substr(0, type_name.size() - 1);
+		int element_size = get_type_size(type_name);
+		if (element_size != sizeof(int)) {
+			if (generate_code) add_assembly_code(PUSH);
+			if (generate_code) add_assembly_code(MOV, element_size / sizeof(int));
+			if (generate_code) add_assembly_code(MUL);
+		}
+		if (generate_code) add_assembly_code(ADD);
+		if (generate_code) add_assembly_code(PUSH);
+		if (generate_code) add_assembly_code(SGET);
+		expect_token("]", "[");
+		next();
+		if (token != "[") break;
+	}
+	return type_name;
+}
+
+string parse_array_element(string name, string symbol_type_name,
+		int offset, bool is_global, bool generate_code, int depth)
+{
+	assert(symbol_type_name.substr(symbol_type_name.size() - 1) == "]");
+	auto it = symbol_dim.find(name);
+	if (it == symbol_dim.end()) {
+		print_error("symbol '%s' (type = '%s') is not an array!\n",
+				name.c_str(), symbol_type_name.c_str());
+	}
+	const auto& dim = it->second.second;
+	if (is_global) {
+		if (generate_code) add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
+	} else {
+		if (generate_code) add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
+	}
+	if (generate_code) add_assembly_code(PUSH);
+	next();
+	for (size_t i = 0; ; ++i) {
+		if (i > 0) {
+			if (generate_code) add_assembly_code(PUSH);
+			if (generate_code) add_assembly_code(MOV, dim[i]);
+			if (generate_code) add_assembly_code(MUL);
+		}
+		parse_expression(";", depth, generate_code);
+		if (i > 0) {
+			if (generate_code) add_assembly_code(ADD);
+		}
+		expect_token("]", "[");
+		next();
+		if (token != "[") {
+			int factor = 1;
+			for (++i; i + 1 < dim.size(); ++i) {
+				factor *= dim[i];
+			}
+			if (factor > 1) {
+				if (generate_code) add_assembly_code(PUSH);
+				if (generate_code) add_assembly_code(MOV, factor);
+				if (generate_code) add_assembly_code(MUL);
+			}
+			break;
+		}
+		next();
+	}
+	if (generate_code) add_assembly_code(ADD);
+	if (generate_code) add_assembly_code(PUSH);
+	if (generate_code) add_assembly_code(SGET);
+	if (!symbol_type_name.empty()) {
+		if (symbol_type_name[symbol_type_name.size() - 1] == '*') {
+			symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
+			while (!symbol_type_name.empty() && symbol_type_name[symbol_type_name.size() - 1] == ' ') {
+				symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
+			}
+		}
+	}
+	return symbol_type_name;
+}
+
+string parse_expression(string stop_token, int depth, bool generate_code)
 {
 	log<3>("[DEBUG] >(%d) %s (stop at '%s', token = '%s'):\n",
 			depth, __FUNCTION__, stop_token.c_str(), token.c_str());
 
 	if (type == number) {
 		int v = eval_number(token);
-		add_assembly_code(MOV, v);
+		if (generate_code) add_assembly_code(MOV, v);
 		next();
 		return "int";
 	} else if (type == text) {
@@ -730,20 +843,20 @@ string parse_expression(string stop_token, int depth)
 		string name = alloc_name();
 		string type_name = "const char*";
 		size_t offset = add_const_string(name, mem, type_name);
-		add_assembly_code(MOV, offset, name + "\t" + type_name);
+		if (generate_code) add_assembly_code(MOV, offset, name + "\t" + type_name);
 		next();
 		return "const char*";
 	} else if (token == "sizeof") {
 		next(); expect_token("(", "sizeof");
-		next(); parse_expression(";", depth + 1);
-		next(); expect_token(")", "sizeof");
+		next(); parse_expression(";", depth + 1, false);
+		expect_token(")", "sizeof");
 		int size = sizeof(int);
-		add_assembly_code(MOV, size);
+		if (generate_code) add_assembly_code(MOV, size);
 		next(); // TODO: support sizeof()
 		return "int";
 	} else if (token == "(") {
 		next();
-		string type_name = parse_expression(";", depth + 1);
+		string type_name = parse_expression(";", depth + 1, generate_code);
 		expect_token(")", "'(' in parse_expression");
 		next();
 		return type_name;
@@ -759,24 +872,24 @@ string parse_expression(string stop_token, int depth)
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 			if (symbol_type_name != "int") print_error("Operator '++' and '--' supports only 'int'!\n");
 			if (is_global) {
-				add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
+				if (generate_code) add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
 			} else {
-				add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+				if (generate_code) add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
 			}
 			if (op_name == "++") {
-				add_assembly_code(INC);
+				if (generate_code) add_assembly_code(INC);
 			} else {
-				add_assembly_code(DEC);
+				if (generate_code) add_assembly_code(DEC);
 			}
 			if (is_global) {
-				add_assembly_code(PUT, offset, name + "\t" + symbol_type_name);
+				if (generate_code) add_assembly_code(PUT, offset, name + "\t" + symbol_type_name);
 			} else {
-				add_assembly_code(LPUT, offset, name + "\t" + symbol_type_name);
+				if (generate_code) add_assembly_code(LPUT, offset, name + "\t" + symbol_type_name);
 			}
 			next();
 			type_name = "int";
 		} else {
-			type_name = parse_expression(op_name, depth + 1);
+			type_name = parse_expression(op_name, depth + 1, generate_code);
 		}
 	} else {
 		string name = token;
@@ -791,53 +904,53 @@ string parse_expression(string stop_token, int depth)
 		} else if (token == "=") {
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 			if (is_global) {
-				add_assembly_code(LEA, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LEA, offset, name + "\t" + type_name);
 			} else {
-				add_assembly_code(LLEA, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LLEA, offset, name + "\t" + type_name);
 			}
-			add_assembly_code(PUSH);
+			if (generate_code) add_assembly_code(PUSH);
 			next();
-			parse_expression(",", depth + 1);
-			add_assembly_code(SPUT, offset, name + "\t" + type_name);
+			parse_expression(",", depth + 1, generate_code);
+			if (generate_code) add_assembly_code(SPUT, offset, name + "\t" + type_name);
 			type_name = symbol_type_name;
 		} else if (token == "+=" || token == "-=" || token == "*=" || token == "/=" || token == "%=" ||
 				token == "<<=" || token == ">>=" || token == "&=" || token == "|=" || token == "&&=" || token == "||=") {
 			string op_name = token;
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 			if (is_global) {
-				add_assembly_code(LEA, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LEA, offset, name + "\t" + type_name);
 			} else {
-				add_assembly_code(LLEA, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LLEA, offset, name + "\t" + type_name);
 			}
-			add_assembly_code(PUSH);
+			if (generate_code) add_assembly_code(PUSH);
 			next();
-			string b_type = parse_expression(",", depth + 1);
-			add_assembly_code(SPUT, offset, name + "\t" + type_name);
+			string b_type = parse_expression(",", depth + 1, generate_code);
+			if (generate_code) add_assembly_code(SPUT, offset, name + "\t" + type_name);
 			type_name = build_code_for_op2(symbol_type_name, op_name, b_type);
 			if (is_global) {
-				add_assembly_code(PUT, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(PUT, offset, name + "\t" + type_name);
 			} else {
-				add_assembly_code(LPUT, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LPUT, offset, name + "\t" + type_name);
 			}
 		} else if (token == "++" || token == "--") { // suffix/postfix
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 			if (is_global) {
-				add_assembly_code(GET, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(GET, offset, name + "\t" + type_name);
 			} else {
-				add_assembly_code(LGET, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LGET, offset, name + "\t" + type_name);
 			}
-			add_assembly_code(PUSH);
+			if (generate_code) add_assembly_code(PUSH);
 			if (token == "++") {
-				add_assembly_code(INC);
+				if (generate_code) add_assembly_code(INC);
 			} else {
-				add_assembly_code(DEC);
+				if (generate_code) add_assembly_code(DEC);
 			}
 			if (is_global) {
-				add_assembly_code(PUT, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(PUT, offset, name + "\t" + type_name);
 			} else {
-				add_assembly_code(LPUT, offset, name + "\t" + type_name);
+				if (generate_code) add_assembly_code(LPUT, offset, name + "\t" + type_name);
 			}
-			add_assembly_code(POP);
+			if (generate_code) add_assembly_code(POP);
 			next();
 			type_name = symbol_type_name;
 		} else if (token == "{") {
@@ -845,28 +958,14 @@ string parse_expression(string stop_token, int depth)
 			skip_until("}", "");
 		} else if (token == "[") {
 			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
-			if (is_global) {
-				add_assembly_code(GET, offset, name + "\t" + type_name);
+			log<3>("symbol_type_name: '%s'\n", symbol_type_name.c_str());
+			if (symbol_type_name.substr(symbol_type_name.size() - 1) == "*") {
+				type_name = parse_pointer_derefer(name, symbol_type_name,
+						offset, is_global, generate_code, depth + 1);
 			} else {
-				add_assembly_code(LGET, offset, name + "\t" + type_name);
+				type_name = parse_array_element(name, symbol_type_name,
+						offset, is_global, generate_code, depth + 1);
 			}
-			add_assembly_code(PUSH);
-			next();
-			parse_expression(";", depth + 1);
-			add_assembly_code(ADD);
-			add_assembly_code(PUSH);
-			add_assembly_code(SGET);
-			expect_token("]", "[");
-			next();
-			if (!symbol_type_name.empty()) {
-				if (symbol_type_name[symbol_type_name.size() - 1] == '*') {
-					symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
-					while (!symbol_type_name.empty() && symbol_type_name[symbol_type_name.size() - 1] == ' ') {
-						symbol_type_name = symbol_type_name.substr(0, symbol_type_name.size() - 1);
-					}
-				}
-			}
-			type_name = symbol_type_name;
 		} else if (token == "." || token == "->") {
 			// TODO: find member
 			next();
@@ -877,21 +976,21 @@ string parse_expression(string stop_token, int depth)
 			auto it = enum_types.find(name);
 			if (it != enum_types.end()) {
 				int value = it->second.second;
-				add_assembly_code(MOV, value);
+				if (generate_code) add_assembly_code(MOV, value);
 				type_name = "int";
 			} else {
 				auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
 				if (is_global) {
 					if (symbol_type_name == "int") {
-						add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
+						if (generate_code) add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
 					} else {
-						add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
+						if (generate_code) add_assembly_code(LEA, offset, name + "\t" + symbol_type_name);
 					}
 				} else {
 					if (symbol_type_name == "int") {
-						add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
+						if (generate_code) add_assembly_code(LGET, offset, name + "\t" + symbol_type_name);
 					} else {
-						add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
+						if (generate_code) add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
 					}
 				}
 				if (stype == code_symbol) {
@@ -906,14 +1005,43 @@ string parse_expression(string stop_token, int depth)
 	while (precedence(token) < precedence(stop_token)) {
 		string op_name = token;
 		next();
-		add_assembly_code(PUSH);
-		string b_type = parse_expression(op_name, depth + 1);
+		if (generate_code) add_assembly_code(PUSH);
+		string b_type = parse_expression(op_name, depth + 1, generate_code);
 		type_name = build_code_for_op(type_name, op_name, b_type);
 	}
 
 	log<3>("[DEBUG] >(%d) %s (stop at '%s', token = '%s') return '%s'\n",
 			depth, __FUNCTION__, stop_token.c_str(), token.c_str(), type_name.c_str());
 	return type_name;
+}
+
+void parse_init_value(vector<int>& dim, vector<int>& dim2, vector<int>& cursor,
+		vector<pair<vector<int>, int>>& init)
+{
+	if (token == "{") {
+		if (cursor.size() >= dim.size()) print_error("too many level in init val!\n");
+		next();
+		size_t i = cursor.size();
+		for (cursor.push_back(0); ; ++cursor[i]) {
+			if (dim[i] == 0) {
+				if (cursor[i] >= dim2[i]) dim2[i] = cursor[i] + 1;
+			} else {
+				if (cursor[i] >= dim[i]) print_error("array init overflow!\n");
+			}
+			parse_init_value(dim, dim2, cursor, init);
+			if (token == "}") break;
+			expect_token(",", "init-value");
+			next();
+		}
+		cursor.pop_back();
+		expect_token("}", "init-value");
+		next();
+	} else {
+		//parse_expression(",");
+		int v = eval_number(token);
+		next();
+		init.push_back(make_pair(cursor, v));
+	}
 }
 
 void parse_declare()
@@ -956,15 +1084,90 @@ void parse_declare()
 	} else { // variable
 		log<3>("[DEBUG] => variable '%s', type='%s'\n", name.c_str(), type_name.c_str());
 		for (;;) {
-			vector<int> init(1);
-			auto [ is_global, offset ] = add_variable(name, init, type_name);
-			if (token == "=") {
+			if (token == "[") {
 				next();
-				parse_expression(",");
-				if (is_global) {
-					add_assembly_code(PUT, offset, name + "\t" + type_name);
+				vector<int> dim;
+				for (;;) {
+					int size = 0; // size undetermined
+					if (token != "]") {
+						if (type != number) print_error("invalid array size '%s'! it should be a number.\n", token.c_str());
+						size = eval_number(token);
+						if (size <= 0) print_error("invalid array size '%s'! it should be a positive integer!\n", token.c_str());
+						next();
+						expect_token("]", "array");
+						next();
+					}
+					dim.push_back(size);
+					if (token != "[") break;
+					next();
+				}
+				int size = 1; for (auto d : dim) size *= d;
+				if (verbose >= 3) {
+					log("array dim = ["); for (size_t i = 0; i < dim.size(); ++i) log("%s%d", (i > 0 ? "," : ""), dim[i]); log("]\n");
+				}
+				if (!size && token != "=") print_error("missing array size!\n");
+				if (token == "=") {
+					next();
+					vector<int> dim2 = dim;
+					vector<int> cursor;
+					vector<pair<vector<int>, int>> init;
+					parse_init_value(dim, dim2, cursor, init);
+					if (verbose >= 3) {
+						for (size_t i = 0; i < init.size(); ++i) {
+							log("init[%zd]: [", i);
+							for (size_t j = 0; j < init[i].first.size(); ++j) {
+								log("%s%d", (j == 0 ? "" : ", "), init[i].first[j]);
+							}
+							log("] = %d\n", init[i].second);
+						}
+					}
+					size = 1; for (auto d : dim2) size *= d;
+					assert(size > 0);
+					type_name += array_suffix(dim2);
+					auto [ is_global, offset ] = add_variable(name, size, type_name);
+					unordered_map<int, pair<string, int>> index_to_val;
+					for (size_t i = 0; i < init.size(); ++i) {
+						const auto& cursor = init[i].first;
+						int val = init[i].second;
+						size_t index = 0;
+						for (size_t j = 0; j < dim2.size(); ++j) {
+							index = index * dim2[j] + cursor[j];
+						}
+						string s = name + "[";
+						for (size_t j = 0; j < cursor.size(); ++j) {
+							if (j > 0) s += "][";
+							s += to_string(cursor[j]);
+						}
+						s += "]";
+						index_to_val.insert(make_pair(index, make_pair(s, val)));
+					}
+					if (is_global) {
+						for (int i = 0; i < size; ++i) {
+							auto it = index_to_val.find(i);
+							data_sec[offset + i] = (it == index_to_val.end() ? 0 : it->second.second);
+						}
+					} else {
+						for (int i = 0; i < size; ++i) {
+							auto it = index_to_val.find(i);
+							add_assembly_code(MOV, (it == index_to_val.end() ? 0 : it->second.second));
+							add_assembly_code(LPUT, offset + i, it->second.first);
+						}
+					}
+					symbol_dim.insert(make_pair(name, make_pair(size, dim2)));
 				} else {
-					add_assembly_code(LPUT, offset, name + "\t" + type_name);
+					type_name += array_suffix(dim);
+					add_variable(name, size, type_name);
+				}
+			} else {
+				auto [ is_global, offset ] = add_variable(name, 1, type_name); // TODO: support non-int type
+				if (token == "=") {
+					next();
+					parse_expression(",");
+					if (is_global) {
+						add_assembly_code(PUT, offset, name + "\t" + type_name);
+					} else {
+						add_assembly_code(LPUT, offset, name + "\t" + type_name);
+					}
 				}
 			}
 			if (token != ",") break;
