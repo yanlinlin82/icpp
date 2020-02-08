@@ -3,7 +3,7 @@
 all: icpp
 
 clean:
-	@rm -fv debug
+	@rm -fv icpp
 
 test:
 	bash tests/run.sh
