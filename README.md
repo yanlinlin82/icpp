@@ -25,7 +25,7 @@ The assembly code can be shown in two ways:
 
 ## Screenshots
 
-![](images/screenshot.png)
+![](screenshot.png)
 
 ## More Examples
 
