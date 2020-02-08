@@ -29,12 +29,9 @@ inline void err(const char* fmt, ...) { va_list ap; va_start(ap, fmt); log(COLOR
 inline void warn(const char* fmt, ...) { va_list ap; va_start(ap, fmt); log(COLOR_YELLOW "Warning: "); log(fmt, ap); log(COLOR_NORMAL); }
 
 //--------------------------------------------------------//
-// machine code definition
+// instruction definition
 
-const int MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
-vector<int> m(MEM_SIZE);
-
-enum machine_code {
+enum instruction {
 	EXIT,  PUSH,  POP,  ADJ,
 	MOV,   LEA,   GET,  PUT, LLEA, LGET, LPUT,
 	SGET,  SPUT,
@@ -42,10 +39,10 @@ enum machine_code {
 	SHL,   SHR,   AND,  OR,  NOT,
 	EQ,    NE,    GE,   GT,  LE,   LT,   LAND, LOR,  LNOT,
 	ENTER, LEAVE, CALL, RET, JMP,  JZ,   JNZ,
-	INVALID_CODE,
+	INVALID,
 };
 
-const char* machine_code_name =
+const char* instruction_name =
 	"EXIT  PUSH  POP   ADJ   "
 	"MOV   LEA   GET   PUT   LLEA  LGET  LPUT  "
 	"SGET  SPUT  "
@@ -54,9 +51,9 @@ const char* machine_code_name =
 	"EQ    NE    GE    GT    LE    LT    LAND  LOR   LNOT  "
 	"ENTER LEAVE CALL  RET   JMP   JZ    JNZ   ";
 
-inline bool machine_code_has_parameter(int code)
+inline bool instruction_has_parameter(int code)
 {
-	return (code == MOV || code == ADJ ||
+	return (code == ADJ || code == MOV ||
 			code == LEA || code == GET || code == PUT ||
 			code == LLEA || code == LGET || code == LPUT ||
 			code == ENTER || code == CALL || code == RET ||
@@ -113,6 +110,9 @@ unordered_map<string, int> operator_precedence = {
 //--------------------------------------------------------//
 // global variables
 
+const int MEM_SIZE = 1024 * 1024; // 1 MB * sizeof(size_t)
+vector<int> m(MEM_SIZE);
+
 enum token_type { unknown = 0, symbol, number, text, op };
 const char* token_type_text[] = { "unknown", "symbol", "number", "text", "op" };
 
@@ -150,7 +150,7 @@ tuple<string, string, string, int> current_function; // name, arg_types, ret_typ
 size_t ext_symbol_counter = 0;
 
 size_t next_display_source_code = 0;
-size_t next_display_machine_code = 0;
+size_t next_display_instruction = 0;
 
 unordered_map<string, unordered_map<string, int>> enum_values; // enum-name => { name => value }
 unordered_map<string, pair<string, int>> enum_types; // name => { enum-name, value }
@@ -281,12 +281,12 @@ size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_positio
 	size_t code_offset = ip;
 	log(COLOR_YELLOW "%-10zd" COLOR_BLUE, ip);
 	size_t i = mem[ip++];
-	if (i < INVALID_CODE) {
-		log("%-14.6s", &machine_code_name[i * 6]);
+	if (i < INVALID) {
+		log("%-14.6s", &instruction_name[i * 6]);
 	} else {
 		log("<0x%08zX>  ", i);
 	}
-	if (machine_code_has_parameter(i)) {
+	if (instruction_has_parameter(i)) {
 		int v = mem[ip++];
 		char buf[64];
 		snprintf(buf, sizeof(buf), "0x%08X (%d)", v, v);
@@ -302,7 +302,7 @@ size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_positio
 	return ip;
 }
 
-size_t add_assembly_code(machine_code action, int param = 0, string comment = "")
+size_t add_assembly_code(instruction code, int param = 0, string comment = "")
 {
 	auto it = offset.find(line_no);
 	if (it == offset.end()) {
@@ -311,9 +311,9 @@ size_t add_assembly_code(machine_code action, int param = 0, string comment = ""
 		it->second.second = code_sec.size();
 	}
 	size_t code_offset = code_sec.size();
-	code_sec.push_back(action);
-	if (machine_code_has_parameter(action)) {
-		if (action == CALL || action == JMP || action == JZ || action == JNZ) {
+	code_sec.push_back(code);
+	if (instruction_has_parameter(code)) {
+		if (code == CALL || code == JMP || code == JZ || code == JNZ) {
 			param -= code_sec.size() + 1; // use relative address
 		}
 		code_sec.push_back(param);
@@ -322,10 +322,10 @@ size_t add_assembly_code(machine_code action, int param = 0, string comment = ""
 		comments.insert(make_pair(code_offset, comment));
 	}
 	if (verbose >= 3) {
-		if (next_display_machine_code < code_sec.size()) {
+		if (next_display_instruction < code_sec.size()) {
 			log(COLOR_BLUE);
-			while (next_display_machine_code < code_sec.size()) {
-				next_display_machine_code = print_code(code_sec, next_display_machine_code);
+			while (next_display_instruction < code_sec.size()) {
+				next_display_instruction = print_code(code_sec, next_display_instruction);
 			}
 			log(COLOR_NORMAL);
 		}
