@@ -135,10 +135,9 @@ size_t external_code_size = 0;
 vector<pair<int, unordered_map<string, tuple<int, int, string>>>> stack_frame_table;
 unordered_map<size_t, string> comments;
 
-enum symbol_type { data_symbol = 0, code_symbol, ext_symbol };
-const char* symbol_type_text[] = { "data", "code", "external" };
-unordered_map<string, tuple<symbol_type, size_t, size_t, string, string, int>> symbols; // name => { symbol_type, offset, size, type, ret_type, arg_count }
-unordered_map<size_t, string> offset_to_symbol[3];
+unordered_map<string, tuple<bool, size_t, size_t, string, string, int>> symbols; // name => { is_code, offset, size, type, ret_type, arg_count }
+unordered_map<size_t, string> data_symbol_dict; // offset => name
+unordered_map<size_t, string> code_symbol_dict; // offset => name
 unordered_map<string, unordered_set<string>> override_functions;
 
 unordered_map<string, pair<int, vector<int>>> symbol_dim; // name => [ size, dim ]
@@ -203,24 +202,23 @@ void print_current_and_exit()
 	exit(1);
 }
 
-void add_symbol(string name, symbol_type stype,
-		size_t offset, size_t size, string type, string ret_type, int arg_count)
+void add_symbol(string name, bool is_code, size_t offset, size_t size, string type, string ret_type, int arg_count)
 {
 	log<3>("[DEBUG] add %s symbol: '%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count = %d\n",
-			symbol_type_text[stype], name.c_str(),
+			(is_code ? "code" : "data"), name.c_str(),
 			offset, size, type.c_str(), ret_type.c_str(), arg_count);
-	symbols[name] = make_tuple(stype, offset, size, type, ret_type, arg_count);
-	if (offset_to_symbol[stype].find(offset) != offset_to_symbol[stype].end()) {
-		err("offset %zd has already existsed! existed '%s', now adding '%s'\n",
-				offset, offset_to_symbol[stype][offset].c_str(), name.c_str());
+	symbols[name] = make_tuple(is_code, offset, size, type, ret_type, arg_count);
+	if (is_code) {
+		code_symbol_dict.insert(make_pair(offset, name));
+	} else {
+		data_symbol_dict.insert(make_pair(offset, name));
 	}
-	offset_to_symbol[stype][offset] = name;
 }
 
 size_t add_const_string(string name, vector<int> val, string type)
 {
 	size_t offset = data_sec.size();
-	add_symbol(name, data_symbol, offset, val.size(), type, "", 0);
+	add_symbol(name, false, offset, val.size(), type, "", 0);
 	data_sec.insert(data_sec.end(), val.begin(), val.end());
 	return offset;
 }
@@ -236,7 +234,7 @@ auto add_variable(string name, int size, string type) -> pair<bool, size_t> // {
 			name.c_str(), size, type.c_str());
 	if (stack_frame_table.empty()) {
 		size_t offset = data_sec.size();
-		add_symbol(name, data_symbol, offset, size, type, "", 0);
+		add_symbol(name, false, offset, size, type, "", 0);
 		data_sec.resize(data_sec.size() + size);
 		return make_pair(true, offset);
 	} else {
@@ -273,7 +271,7 @@ void add_argument(string name, string type, size_t offset)
 void add_code_symbol(string name, string args_type, string ret_type, int arg_count)
 {
 	override_functions[name].insert(name + args_type);
-	add_symbol(name + args_type, code_symbol, code_sec.size(), 0, args_type, ret_type, arg_count);
+	add_symbol(name + args_type, true, code_sec.size(), 0, args_type, ret_type, arg_count);
 }
 
 size_t print_code(const vector<int>& mem, size_t ip, size_t code_loading_position = 0)
@@ -352,13 +350,13 @@ void add_external_symbol(string name, string args_type, string ret_type = "", in
 	//   found as [bp + 1] in subroutine (before ENTER)
 	if (ret_type.empty()) { // data
 		size_t offset = data_sec.size();
-		add_symbol(name, data_symbol, offset, 1, args_type, "", 0);
+		add_symbol(name, false, offset, 1, args_type, "", 0);
 		data_sec.resize(offset + 1);
 	} else { // code
 		size_t offset = code_sec.size();
 		string name_with_args = name + "(" + args_type + ")";
 		override_functions[name].insert(name_with_args);
-		add_symbol(name_with_args, code_symbol, offset, 2, args_type, ret_type, arg_count);
+		add_symbol(name_with_args, true, offset, 2, args_type, ret_type, arg_count);
 		add_assembly_code(RET, (arg_count >= 0 ? arg_count : 0), ret_type + " " + name_with_args);
 	}
 }
@@ -556,7 +554,7 @@ string parse_type_name()
 	return type_name;
 }
 
-auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, string, symbol_type, string, int> // offset, arg_types, stype, type_name, arg_count
+auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, string, bool, string, int> // offset, arg_types, is_code, type_name, arg_count
 {
 	auto it = override_functions.find(name);
 	if (it == override_functions.end()) {
@@ -575,15 +573,15 @@ auto query_function(string name, vector<string>& arg_types) -> tuple<size_t, str
 			if (it3 == symbols.end()) {
 				err("unexpected runtime error!\n");
 			}
-			auto [ stype, offset, size, symbol_type_name, ret_type, arg_count ] = it3->second;
-			return make_tuple(offset, ret_type, stype, type_name, arg_count);
+			auto [ is_code, offset, size, symbol_type_name, ret_type, arg_count ] = it3->second;
+			return make_tuple(offset, ret_type, is_code, type_name, arg_count);
 		}
 	}
 	err("function '%s' not matched!\n", name.c_str());
 	exit(1);
 }
 
-auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_global, offset, name, stype }
+auto query_symbol(string s) -> tuple<bool, size_t, string, bool> // { is_global, offset, name, is_code }
 {
 	log<4>("[DEBUG] query symbol: '%s'\n", s.c_str());
 	print_stack_frame();
@@ -592,7 +590,7 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 	bool is_global = false;
 	size_t offset = 0;
 	string type_name;
-	symbol_type stype;
+	bool is_code = false;
 	for (size_t i = stack_frame_table.size(); i > 0; --i) {
 		auto& stack_frame = stack_frame_table[i - 1].second;
 		auto it = stack_frame.find(s);
@@ -620,15 +618,14 @@ auto query_symbol(string s) -> tuple<bool, size_t, string, symbol_type> // { is_
 				err("unknown symbol '%s'!\n", s.c_str());
 			}
 		}
-		auto [ stype_2, offset_2, size, t, ret_type, arg_count ] = it->second;
-		stype = stype_2;
+		auto [ is_code_2, offset_2, size, t, ret_type, arg_count ] = it->second;
+		is_code = is_code_2;
 		offset = offset_2;
 		type_name = t;
 	}
-	log<3>("[DEBUG] symbol '%s': type='%s', offset=%zd, type='%s', style='%s'\n",
-			s.c_str(), (is_global ? "global" : "local"), offset,
-			type_name.c_str(), symbol_type_text[stype]);
-	return make_tuple(is_global, offset, type_name, stype);
+	log<3>("[DEBUG] symbol '%s': '%s', type='%s', offset=%zd, type='%s'\n",
+			s.c_str(), (is_code ? "code" : "data"), (is_global ? "global" : "local"), offset, type_name.c_str());
+	return make_tuple(is_global, offset, type_name, is_code);
 }
 
 string build_code_for_op2(string a_type, string op_name, string b_type)
@@ -676,8 +673,8 @@ string build_code_for_op(string a_type, string op_name, string b_type)
 		if (it == symbols.end()) {
 			err("Unknown function '%s'\n", name.c_str());
 		}
-		auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
-		if (stype != code_symbol && stype != ext_symbol) {
+		auto [ is_code, offset, size, type_name, ret_type, arg_count ] = it->second;
+		if (!is_code) {
 			err("symbol '%s' is not a function!\n", name.c_str());
 		}
 		add_assembly_code(PUSH);
@@ -705,7 +702,7 @@ string parse_function(string name)
 	}
 	expect_token(")", "function '" + name + "'");
 	log<3>("[DEBUG] function '%s' has %zd args\n", name.c_str(), arg_types.size());
-	auto [ offset, ret_type, stype, type_name, arg_count ] = query_function(name, arg_types);
+	auto [ offset, ret_type, is_code, type_name, arg_count ] = query_function(name, arg_types);
 	if (arg_count < 0) {
 		add_assembly_code(MOV, arg_types.size() + arg_count, "variable parameter count");
 		add_assembly_code(PUSH);
@@ -866,7 +863,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 		if (op_name == "++" || op_name == "--") {
 			if (type != symbol) err("unexpected token ('%s') after '%s'!\n", token.c_str(), op_name.c_str());
 			string name = token;
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 			if (symbol_type_name != "int") err("Operator '++' and '--' supports only 'int'!\n");
 			if (is_global) {
 				if (generate_code) add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
@@ -899,7 +896,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 		if (token == "(") {
 			type_name = parse_function(name);
 		} else if (token == "=") {
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 			if (is_global) {
 				if (generate_code) add_assembly_code(LEA, offset, name + "\t" + type_name);
 			} else {
@@ -913,7 +910,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 		} else if (token == "+=" || token == "-=" || token == "*=" || token == "/=" || token == "%=" ||
 				token == "<<=" || token == ">>=" || token == "&=" || token == "|=" || token == "&&=" || token == "||=") {
 			string op_name = token;
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 			if (is_global) {
 				if (generate_code) add_assembly_code(LEA, offset, name + "\t" + type_name);
 			} else {
@@ -930,7 +927,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 				if (generate_code) add_assembly_code(LPUT, offset, name + "\t" + type_name);
 			}
 		} else if (token == "++" || token == "--") { // suffix/postfix
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 			if (is_global) {
 				if (generate_code) add_assembly_code(GET, offset, name + "\t" + type_name);
 			} else {
@@ -954,7 +951,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 			// TODO: initializer
 			skip_until("}", "");
 		} else if (token == "[") {
-			auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+			auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 			log<3>("symbol_type_name: '%s'\n", symbol_type_name.c_str());
 			if (symbol_type_name.substr(symbol_type_name.size() - 1) == "*") {
 				type_name = parse_pointer_derefer(name, symbol_type_name,
@@ -976,7 +973,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 				if (generate_code) add_assembly_code(MOV, value);
 				type_name = "int";
 			} else {
-				auto [ is_global, offset, symbol_type_name, stype ] = query_symbol(name);
+				auto [ is_global, offset, symbol_type_name, is_code ] = query_symbol(name);
 				if (is_global) {
 					if (symbol_type_name == "int") {
 						if (generate_code) add_assembly_code(GET, offset, name + "\t" + symbol_type_name);
@@ -990,7 +987,7 @@ string parse_expression(string stop_token, int depth, bool generate_code)
 						if (generate_code) add_assembly_code(LLEA, offset, name + "\t" + symbol_type_name);
 					}
 				}
-				if (stype == code_symbol) {
+				if (is_code) {
 					type_name = "(*)(" + symbol_type_name + ")";
 				} else {
 					type_name = symbol_type_name;
@@ -1375,9 +1372,9 @@ void init_symbol()
 		size_t i = 0;
 		for (auto it = symbols.begin(); it != symbols.end(); ++it) {
 			auto name = it->first;
-			auto [ stype, offset, size, type_name, ret_type, arg_count ] = it->second;
-			log("[DEBUG] [%zd] '%s': type='%s', offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count=%d\n",
-					i++, name.c_str(), symbol_type_text[stype], offset, size, type_name.c_str(), ret_type.c_str(), arg_count);
+			auto [ is_code, offset, size, type_name, ret_type, arg_count ] = it->second;
+			log("[DEBUG] [%zd] '%s': %s, offset=%zd, size=%zd, type='%s', ret_type='%s', arg_count=%d\n",
+					i++, name.c_str(), (is_code ? "code" : "data"), offset, size, type_name.c_str(), ret_type.c_str(), arg_count);
 		}
 	}
 }
@@ -1459,10 +1456,10 @@ int show()
 	log("\n");
 
 	for (size_t i = (verbose >= 1 ? 0 : external_data_size); i < data_sec.size(); ++i) {
-		auto it = offset_to_symbol[data_symbol].find(i);
-		if (it != offset_to_symbol[data_symbol].end()) {
+		auto it = data_symbol_dict.find(i);
+		if (it != data_symbol_dict.end()) {
 			auto name = it->second;
-			auto [ stype, offset, size, type, ret_type, arg_count ] = symbols[name];
+			auto [ is_code, offset, size, type, ret_type, arg_count ] = symbols[name];
 			string data_type = "word";
 			if (type == "const char*") data_type = "byte";
 			log(COLOR_YELLOW "%-10zd", i);
@@ -1533,11 +1530,11 @@ void print_vm_env(int ax, int ip, int sp, int bp)
 	return;
 }
 
-string get_symbol(symbol_type stype, size_t offset)
+string get_data_symbol(size_t offset)
 {
-	auto it = offset_to_symbol[stype].find(offset);
-	if (it == offset_to_symbol[stype].end()) {
-		err("Unknown symbol offset '%zd' (stype = '%s')\n", offset, symbol_type_text[stype]);
+	auto it = data_symbol_dict.find(offset);
+	if (it == data_symbol_dict.end()) {
+		err("Unknown data symbol offset '%zd'\n", offset);
 		exit(1);
 	}
 	return it->second;
@@ -1550,7 +1547,7 @@ int call_ext(const string& name, int sp)
 		int b = m[sp + 1];
 		int a = m[sp + 2];
 		log<3>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a);
+		string aa = get_data_symbol(a);
 		if (aa == "cout") {
 			cout << b;
 		} else if (aa == "cerr") {
@@ -1564,7 +1561,7 @@ int call_ext(const string& name, int sp)
 		int b = m[sp + 1];
 		int a = m[sp + 2];
 		log<3>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a);
+		string aa = get_data_symbol(a);
 		const char* s = reinterpret_cast<const char*>(&m[b]);
 		if (aa == "cout") {
 			cout << s;
@@ -1579,7 +1576,7 @@ int call_ext(const string& name, int sp)
 		int b = m[sp + 1];
 		int a = m[sp + 2];
 		log<3>("[DEBUG] args: %d, %d\n", a, b);
-		string aa = get_symbol(data_symbol, a);
+		string aa = get_data_symbol(a);
 		if (aa == "cout") {
 			cout << endl;
 		} else if (aa == "cerr") {
@@ -1768,8 +1765,8 @@ int run(int argc, const char** argv)
 		else { warn("unknown instruction: '%zd'\n", i); }
 
 		if (ip && ip < static_cast<int>(code_loading_position + external_code_size)) {
-			auto it = offset_to_symbol[code_symbol].find(ip - code_loading_position);
-			if (it != offset_to_symbol[code_symbol].end()) {
+			auto it = code_symbol_dict.find(ip - code_loading_position);
+			if (it != code_symbol_dict.end()) {
 				ax = call_ext(it->second, sp);
 			}
 		}

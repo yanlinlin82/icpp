@@ -5,7 +5,7 @@ all: icpp
 clean:
 	@rm -fv icpp
 
-test:
+test: icpp
 	bash tests/run.sh
 
 icpp: icpp.cpp
